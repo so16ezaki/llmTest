@@ -1,0 +1,12 @@
+.vscode/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+pip-wheel-metadata/
+*.log
+.DS_Store

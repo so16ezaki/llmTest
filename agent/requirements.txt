@@ -1,0 +1,20 @@
+# Dify ナレッジエージェント 依存ライブラリ
+# LLMバックエンド: Ollama（ローカル）
+
+# 必須
+requests>=2.31.0        # Ollama API通信
+tiktoken>=0.7.0         # トークンカウント（cl100k_base）
+
+# ドキュメントリーダー
+pymupdf4llm>=0.0.17     # PDF → Markdown
+beautifulsoup4>=4.12.0  # HTML → Markdown
+python-docx>=1.1.0      # Word (.docx) → Markdown
+pandas>=2.0.0           # Excel/CSV → Markdownテーブル
+openpyxl>=3.1.0         # Excel読み込み（pandasのバックエンド）
+lxml>=5.0.0             # HTML/RST パーサー
+docutils>=0.20.0        # reStructuredText → Markdown
+
+# 静的解析（オプション - なくても動作する）
+# tree-sitter>=0.22.0
+# tree-sitter-c>=0.21.0
+# tree-sitter-javascript>=0.21.0
