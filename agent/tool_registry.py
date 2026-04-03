@@ -504,7 +504,25 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
     try:
         module = importlib.import_module(module_path)
         func = getattr(module, func_name)
-        result = func(**args)
+        result = _run_with_timeout(func, args, timeout=_TOOL_TIMEOUT)
         return str(result) if result is not None else ""
+    except TimeoutError:
+        return f"[error] {name} がタイムアウトしました（{_TOOL_TIMEOUT}秒）"
     except Exception as e:  # noqa: BLE001
         return f"[error] {name} 実行エラー: {type(e).__name__}: {e}"
+
+
+# ツール実行タイムアウト（秒）
+_TOOL_TIMEOUT = 60
+
+
+def _run_with_timeout(func, args: dict, timeout: int = 60):
+    """関数を別スレッドで実行し、タイムアウトを適用する。"""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, **args)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"Tool execution exceeded {timeout}s")

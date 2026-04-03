@@ -95,6 +95,19 @@ def _process_node(node, lines: list[str]) -> None:
             _process_node(child, lines)
 
 
+def _html_to_markdown(html_str: str) -> str:
+    """HTML文字列をMarkdownに変換する。rstリーダー等から利用。"""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        # BeautifulSoup がない場合はタグを除去して返す
+        return re.sub(r"<[^>]+>", "", html_str)
+    soup = BeautifulSoup(html_str, "lxml" if _has_lxml() else "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    return _to_markdown(soup)
+
+
 def _table_to_md(table_node) -> str:
     rows = []
     for tr in table_node.find_all("tr"):

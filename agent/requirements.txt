@@ -14,6 +14,9 @@ openpyxl>=3.1.0         # Excel読み込み（pandasのバックエンド）
 lxml>=5.0.0             # HTML/RST パーサー
 docutils>=0.20.0        # reStructuredText → Markdown
 
+# テスト
+pytest>=7.0.0           # ユニットテスト
+
 # 静的解析（オプション - なくても動作する）
 # tree-sitter>=0.22.0
 # tree-sitter-c>=0.21.0

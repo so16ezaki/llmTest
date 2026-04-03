@@ -61,22 +61,50 @@ def chat(
         "user": DIFY_USER,
     }
 
-    try:
-        resp = requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            stream=(DIFY_RESPONSE_MODE == "streaming"),
-            timeout=300,
-        )
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Dify API error: {e}") from e
+    resp = _request_with_retry(
+        url, payload, headers,
+        stream=(DIFY_RESPONSE_MODE == "streaming"),
+    )
 
     if DIFY_RESPONSE_MODE == "streaming":
         return _parse_streaming_response(resp)
     else:
         return _parse_blocking_response(resp.json())
+
+
+def _request_with_retry(
+    url: str,
+    payload: dict,
+    headers: dict,
+    stream: bool = False,
+    max_retries: int = 3,
+    timeout: int = 300,
+) -> requests.Response:
+    """リトライ付きHTTPリクエスト。exponential backoff。"""
+    import time
+
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(
+                url, json=payload, headers=headers,
+                stream=stream, timeout=timeout,
+            )
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_err = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                time.sleep(wait)
+            continue
+        except requests.RequestException as e:
+            raise RuntimeError(f"Dify API error: {e}") from e
+    raise RuntimeError(f"Dify API error after {max_retries} retries: {last_err}")
 
 
 def _build_query(messages: list[dict]) -> str:

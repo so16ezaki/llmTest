@@ -16,7 +16,10 @@ def get_reader(filepath: str):
     if ext == ".pdf":
         from readers import pdf
         return pdf
-    elif ext in (".md", ".txt", ".rst"):
+    elif ext == ".rst":
+        from readers import rst
+        return rst
+    elif ext in (".md", ".txt"):
         from readers import markdown
         return markdown
     elif ext in (".html", ".htm"):

@@ -50,14 +50,43 @@ def chat(
     if tools:
         payload["tools"] = tools
 
-    try:
-        resp = requests.post(url, json=payload, timeout=300)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Ollama API error: {e}") from e
+    resp = _request_with_retry(url, payload)
+    if resp is None:
+        raise RuntimeError("Ollama API error: all retries exhausted")
 
     data = resp.json()
     return _parse_response(data)
+
+
+def _request_with_retry(
+    url: str,
+    payload: dict,
+    max_retries: int = 3,
+    timeout: int = 300,
+) -> requests.Response:
+    """リトライ付きHTTPリクエスト。exponential backoff。"""
+    import time
+
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 429:
+                # レート制限: リトライ
+                wait = 2 ** attempt
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_err = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                time.sleep(wait)
+            continue
+        except requests.RequestException as e:
+            raise RuntimeError(f"Ollama API error: {e}") from e
+    raise RuntimeError(f"Ollama API error after {max_retries} retries: {last_err}")
 
 
 def _normalize_messages(messages: list[dict]) -> list[dict]:

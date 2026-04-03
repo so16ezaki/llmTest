@@ -212,9 +212,30 @@ def _analyze_dead_code(files: list[str]) -> dict:
             if fname not in all_called and not fname.startswith("_"):
                 unused_functions.append({"file": fpath, "function": fname})
 
+    # 未使用変数の検出
+    unused_variables = []
+    for fpath in files:
+        parser = _get_parser(fpath)
+        variables = parser.get_variables()
+        calls = parser.get_all_calls()
+        try:
+            with open(fpath, encoding="utf-8", errors="ignore") as f:
+                source = f.read()
+        except OSError:
+            continue
+        for var in variables:
+            name = var["name"]
+            if name.startswith("_"):
+                continue
+            # ソース内での出現回数をカウント（定義自身を除く）
+            import re as _re
+            occurrences = len(_re.findall(r"\b" + _re.escape(name) + r"\b", source))
+            if occurrences <= 1 and name not in calls:
+                unused_variables.append({"file": fpath, "variable": name, "line": var.get("line", 0)})
+
     return {
         "unused_functions": unused_functions,
-        "unused_variables": [],  # 簡易実装
+        "unused_variables": unused_variables,
         "unused_imports": unused_imports,
     }
 
@@ -268,18 +289,23 @@ def _analyze_issues(files: list[str]) -> dict:
 
 
 def _analyze_data_flow(files: list[str]) -> dict:
-    """変数の定義→代入→参照の追跡（簡易実装）。"""
+    """変数の定義→代入→参照の追跡。"""
     results = []
     for fpath in files:
         parser = _get_parser(fpath)
-        for var in parser.get_variables():
-            results.append({
-                "variable": var["name"],
-                "file": fpath,
-                "definitions": [{"line": var.get("line", 0)}],
-                "assignments": [],
-                "references": [],
-            })
+        if hasattr(parser, "get_data_flow"):
+            for entry in parser.get_data_flow():
+                results.append({**entry, "file": fpath})
+        else:
+            # フォールバック: 変数定義のみ
+            for var in parser.get_variables():
+                results.append({
+                    "variable": var["name"],
+                    "file": fpath,
+                    "definitions": [{"line": var.get("line", 0)}],
+                    "assignments": [],
+                    "references": [],
+                })
     return {"data_flow": results}
 
 

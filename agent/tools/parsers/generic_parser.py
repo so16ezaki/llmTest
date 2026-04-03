@@ -79,6 +79,7 @@ class GenericParser:
                     "cyclomatic": 1,
                     "max_nesting": 0,
                     "qualifiers": [],
+                    "blocks": self._get_control_flow_blocks(match.start()),
                 }
         return list(funcs.values())
 
@@ -95,6 +96,29 @@ class GenericParser:
             if name not in keywords and len(name) > 1:
                 calls.add(name)
         return list(calls)
+
+    def _get_control_flow_blocks(self, start: int, window: int = 500) -> list[dict]:
+        """関数定義付近の制御フロー構造を簡易抽出する。"""
+        snippet = self._source[start:start + window]
+        base_line = self._source[:start].count("\n") + 1
+        cf_pattern = re.compile(r"\b(if|while|for|switch)\b", re.MULTILINE)
+        blocks = []
+        for match in cf_pattern.finditer(snippet):
+            line = base_line + snippet[:match.start()].count("\n")
+            blocks.append({"type": match.group(1), "line": line, "children": []})
+        return blocks
+
+    def get_data_flow(self) -> list[dict]:
+        """変数の定義→代入→参照の簡易追跡。"""
+        var_info: dict[str, dict] = {}
+        for var in self.get_variables():
+            name = var["name"]
+            var_info[name] = {
+                "definitions": [{"line": var["line"]}],
+                "assignments": [],
+                "references": [],
+            }
+        return [{"variable": k, **v} for k, v in var_info.items()]
 
     def get_imports(self) -> list[dict]:
         imports = []

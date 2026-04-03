@@ -76,6 +76,7 @@ class JsParser:
                     "cyclomatic": cyclomatic,
                     "max_nesting": 0,
                     "qualifiers": [],
+                    "blocks": self._get_control_flow_blocks(snippet, line),
                 }
         return list(funcs.values())
 
@@ -86,6 +87,43 @@ class JsParser:
             if name not in _JS_KEYWORDS and len(name) > 1:
                 calls.add(name)
         return list(calls)
+
+    def _get_control_flow_blocks(self, code: str, base_line: int) -> list[dict]:
+        """コードスニペットから制御フロー構造を抽出する。"""
+        cf_pattern = re.compile(r"\b(if|while|for|switch|do)\s*\(", re.MULTILINE)
+        blocks = []
+        for match in cf_pattern.finditer(code):
+            line = base_line + code[:match.start()].count("\n")
+            blocks.append({
+                "type": match.group(1),
+                "line": line,
+                "children": [],
+            })
+        return blocks
+
+    def get_data_flow(self) -> list[dict]:
+        """変数の定義→代入→参照の簡易追跡。"""
+        var_info: dict[str, dict] = {}
+        for var in self.get_variables():
+            name = var["name"]
+            var_info[name] = {
+                "definitions": [{"line": var["line"]}],
+                "assignments": [],
+                "references": [],
+            }
+        assign_pat = re.compile(r"\b(\w+)\s*=[^=]", re.MULTILINE)
+        for match in assign_pat.finditer(self._source):
+            name = match.group(1)
+            if name in var_info:
+                line = self._source[:match.start()].count("\n") + 1
+                var_info[name]["assignments"].append({"line": line})
+        ref_pat = re.compile(r"\b(\w+)\b(?!\s*[\(=])", re.MULTILINE)
+        for match in ref_pat.finditer(self._source):
+            name = match.group(1)
+            if name in var_info and name not in _JS_KEYWORDS:
+                line = self._source[:match.start()].count("\n") + 1
+                var_info[name]["references"].append({"line": line})
+        return [{"variable": k, **v} for k, v in var_info.items()]
 
     def get_imports(self) -> list[dict]:
         imports = []
@@ -156,6 +194,40 @@ class JsParser:
                 "message": "eval()の使用は危険です",
                 "line": line,
             })
+
+        # == vs === (暗黙の型変換)
+        loose_eq = re.compile(r"[^=!]==[^=]")
+        for match in loose_eq.finditer(self._source):
+            line = self._source[:match.start()].count("\n") + 1
+            issues.append({
+                "severity": "low",
+                "type": "loose_equality",
+                "message": "== の代わりに === の使用を推奨（暗黙の型変換を回避）",
+                "line": line,
+            })
+
+        # != vs !== (暗黙の型変換)
+        loose_neq = re.compile(r"!=[^=]")
+        for match in loose_neq.finditer(self._source):
+            line = self._source[:match.start()].count("\n") + 1
+            issues.append({
+                "severity": "low",
+                "type": "loose_equality",
+                "message": "!= の代わりに !== の使用を推奨",
+                "line": line,
+            })
+
+        # innerHTML 使用 (XSS リスク)
+        inner_html = re.compile(r"\.innerHTML\s*=")
+        for match in inner_html.finditer(self._source):
+            line = self._source[:match.start()].count("\n") + 1
+            issues.append({
+                "severity": "high",
+                "type": "xss_risk",
+                "message": "innerHTML への直接代入はXSSリスクがあります",
+                "line": line,
+            })
+
         # TODO コメント
         todo_pattern = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b.*", re.IGNORECASE)
         for i, line in enumerate(self._lines, 1):
