@@ -67,5 +67,22 @@ SECTION_MIN_CHARS: int = 500
 # 章分割の最大文字数（これ超過は分割）
 SECTION_MAX_CHARS: int = 30000
 
+# ── PDF並列処理 ──────────────────────────────────────────
+# この値以上のページ数で並列処理を有効化
+PDF_PARALLEL_THRESHOLD: int = int(os.getenv("PDF_PARALLEL_THRESHOLD", "100"))
+
+# 並列処理時のチャンクサイズ（ページ数）
+PDF_CHUNK_PAGES: int = int(os.getenv("PDF_CHUNK_PAGES", "50"))
+
+# 並列ワーカー数
+PDF_WORKERS: int = int(os.getenv("PDF_WORKERS", "4"))
+
+# ページベース分割時のセクションあたりページ数（TOC/フォントサイズ検出失敗時のフォールバック）
+PAGES_PER_SECTION_FALLBACK: int = int(os.getenv("PAGES_PER_SECTION_FALLBACK", "10"))
+
+# ── キャッシュ ────────────────────────────────────────────
+SKILLS_CACHE_FILE: str = os.getenv("SKILLS_CACHE_FILE", ".skills_cache.json")
+ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "1") == "1"
+
 # ── コスト管理（オプション・未実装） ──────────────────────
 # BUDGET_USD: float = float(os.getenv("BUDGET_USD", "0"))  # 0 = 無制限

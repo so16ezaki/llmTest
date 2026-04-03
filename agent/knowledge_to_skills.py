@@ -4,21 +4,42 @@ knowledge_to_skills.py — ナレッジ取り込みCLI
 任意形式のドキュメントをスキルファイル（Markdown）に変換し、
 skills/{doc_name}/ に保存する。
 
-使用法:
-    python knowledge_to_skills.py <input_path> [--llm] [--name <doc_name>]
+大規模PDF対応:
+  - PDF構造情報（TOC、フォントサイズ）を活用した高品質セクション分割
+  - ファイルハッシュによるキャッシュ（変更なしならスキップ）
+  - チェックポイントによる中断再開
+  - 並列ファイル書き出し
+  - 進捗表示
 
-    --llm   : OllamaのLLMで構造化（各セクションに要約を付与）
-    --name  : スキル名を手動指定（省略時はファイル名から自動生成）
+使用法:
+    python knowledge_to_skills.py <input_path> [--llm] [--name <doc_name>] [--no-cache] [--force]
+
+    --llm      : OllamaのLLMで構造化（各セクションに要約を付与）
+    --name     : スキル名を手動指定（省略時はファイル名から自動生成）
+    --no-cache : キャッシュを無視して再処理
+    --force    : チェックポイントを無視して最初から処理
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-from config import SECTION_MAX_CHARS, SECTION_MIN_CHARS, SKILLS_DIR, SKILLS_INDEX
+from config import (
+    ENABLE_CACHE,
+    PAGES_PER_SECTION_FALLBACK,
+    SECTION_MAX_CHARS,
+    SECTION_MIN_CHARS,
+    SKILLS_CACHE_FILE,
+    SKILLS_DIR,
+    SKILLS_INDEX,
+)
 
 
 def main() -> None:
@@ -26,6 +47,8 @@ def main() -> None:
     parser.add_argument("input_path", help="入力ファイルまたはディレクトリ")
     parser.add_argument("--llm", action="store_true", help="LLMで構造化する")
     parser.add_argument("--name", help="スキル名（省略時はファイル名から自動生成）")
+    parser.add_argument("--no-cache", action="store_true", help="キャッシュを無視して再処理")
+    parser.add_argument("--force", action="store_true", help="チェックポイントを無視して最初から処理")
     args = parser.parse_args()
 
     input_path = args.input_path
@@ -33,13 +56,29 @@ def main() -> None:
         print(f"[error] パスが見つかりません: {input_path}", file=sys.stderr)
         sys.exit(1)
 
+    use_cache = ENABLE_CACHE and not args.no_cache
+
     # ディレクトリの場合は再帰的に処理
     if os.path.isdir(input_path):
         files = _collect_files(input_path)
-        for fpath in files:
-            _process_file(fpath, doc_name=None, use_llm=args.llm)
+        total = len(files)
+        for i, fpath in enumerate(files):
+            print(f"\n[{i+1}/{total}] ", end="")
+            _process_file(
+                fpath,
+                doc_name=None,
+                use_llm=args.llm,
+                use_cache=use_cache,
+                force=args.force,
+            )
     else:
-        _process_file(input_path, doc_name=args.name, use_llm=args.llm)
+        _process_file(
+            input_path,
+            doc_name=args.name,
+            use_llm=args.llm,
+            use_cache=use_cache,
+            force=args.force,
+        )
 
     print("完了。")
 
@@ -54,74 +93,430 @@ def _collect_files(directory: str) -> list[str]:
     exclude_dirs = {".vscode", ".venv", "venv", "env", ".git"}
     files = []
     for root, dirs, fnames in os.walk(directory):
-        # 除外ディレクトリを再帰対象から外す
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
-
         for fname in sorted(fnames):
             if os.path.splitext(fname)[1].lower() in supported:
                 files.append(os.path.join(root, fname))
     return files
 
 
+# ── キャッシュ管理 ────────────────────────────────────────────────
+
+
+def _load_cache() -> dict:
+    """キャッシュファイルを読み込む。"""
+    if os.path.isfile(SKILLS_CACHE_FILE):
+        try:
+            with open(SKILLS_CACHE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"files": {}}
+
+
+def _save_cache(cache: dict) -> None:
+    """キャッシュファイルを保存する。"""
+    with open(SKILLS_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+
+def _file_hash(filepath: str) -> str:
+    """ファイルのSHA256ハッシュを返す。"""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            h.update(chunk)
+    return f"sha256:{h.hexdigest()}"
+
+
+def _is_cached(filepath: str, cache: dict) -> bool:
+    """ファイルがキャッシュ済み（変更なし）か判定する。"""
+    abs_path = os.path.abspath(filepath)
+    entry = cache.get("files", {}).get(abs_path)
+    if not entry:
+        return False
+    current_hash = _file_hash(filepath)
+    return entry.get("hash") == current_hash
+
+
+def _update_cache_entry(filepath: str, doc_name: str, sections_count: int, cache: dict) -> None:
+    """キャッシュにファイルエントリを登録する。"""
+    abs_path = os.path.abspath(filepath)
+    cache.setdefault("files", {})[abs_path] = {
+        "hash": _file_hash(filepath),
+        "mtime": os.path.getmtime(filepath),
+        "doc_name": doc_name,
+        "sections_count": sections_count,
+        "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+# ── チェックポイント管理 ──────────────────────────────────────────
+
+
+def _checkpoint_path(doc_name: str) -> str:
+    return os.path.join(SKILLS_DIR, doc_name, ".checkpoint.json")
+
+
+def _load_checkpoint(doc_name: str) -> dict | None:
+    path = _checkpoint_path(doc_name)
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
+def _save_checkpoint(doc_name: str, data: dict) -> None:
+    path = _checkpoint_path(doc_name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def _remove_checkpoint(doc_name: str) -> None:
+    path = _checkpoint_path(doc_name)
+    if os.path.isfile(path):
+        os.remove(path)
+
+
+# ── メイン処理 ────────────────────────────────────────────────────
+
+
 def _process_file(
     filepath: str,
     doc_name: str | None = None,
     use_llm: bool = False,
+    use_cache: bool = True,
+    force: bool = False,
 ) -> None:
     """1ファイルを処理してスキルファイルを生成する。"""
-    print(f"処理中: {filepath}")
-
-    # Markdown変換
-    from readers import read_file
-    try:
-        markdown_content = read_file(filepath)
-    except Exception as e:
-        print(f"  [error] 読み込み失敗: {e}", file=sys.stderr)
-        return
+    start_time = time.time()
 
     # ドキュメント名
     if not doc_name:
         doc_name = _make_doc_name(filepath)
 
-    # 章分割
-    sections = split_sections(markdown_content)
-    sections = merge_small_sections(sections, min_chars=SECTION_MIN_CHARS)
-    sections = split_large_sections(sections, max_chars=SECTION_MAX_CHARS)
+    # キャッシュチェック
+    cache = _load_cache() if use_cache else {"files": {}}
+    if use_cache and _is_cached(filepath, cache):
+        print(f"スキップ（キャッシュ済み）: {filepath}")
+        return
 
-    # LLM構造化（オプション）
-    if use_llm:
-        sections = _llm_structure(sections, doc_name)
+    print(f"処理中: {filepath}")
+    is_pdf = filepath.lower().endswith(".pdf")
+
+    # チェックポイントからの再開
+    checkpoint = None if force else _load_checkpoint(doc_name)
+    if checkpoint and checkpoint.get("status") == "sections_ready":
+        print(f"  チェックポイントから再開（{checkpoint.get('sections_count', '?')}セクション）")
+        sections = checkpoint["sections"]
+    else:
+        # Markdown変換
+        print("  [1/4] ファイル読み込み・変換...", file=sys.stderr)
+        from readers import read_file
+        try:
+            markdown_content = read_file(filepath)
+        except Exception as e:
+            print(f"  [error] 読み込み失敗: {e}", file=sys.stderr)
+            return
+
+        # 章分割
+        print("  [2/4] セクション分割...", file=sys.stderr)
+        if is_pdf:
+            sections = split_sections_pdf(filepath, markdown_content)
+        else:
+            sections = split_sections(markdown_content)
+
+        sections = merge_small_sections(sections, min_chars=SECTION_MIN_CHARS)
+        sections = split_large_sections(sections, max_chars=SECTION_MAX_CHARS)
+
+        # LLM構造化（オプション）
+        if use_llm:
+            print("  [3/4] LLM構造化...", file=sys.stderr)
+            sections = _llm_structure(sections, doc_name)
+        else:
+            print("  [3/4] LLM構造化...スキップ", file=sys.stderr)
+
+        # チェックポイント保存
+        _save_checkpoint(doc_name, {
+            "status": "sections_ready",
+            "sections": sections,
+            "sections_count": len(sections),
+            "filepath": filepath,
+        })
 
     # 保存
+    print(f"  [4/4] {len(sections)}セクションを書き出し...", file=sys.stderr)
     skill_dir = os.path.join(SKILLS_DIR, doc_name)
     os.makedirs(skill_dir, exist_ok=True)
 
-    saved_files = []
-    for i, section in enumerate(sections):
+    saved_files = _write_sections_parallel(sections, skill_dir)
+
+    # index.md を更新
+    _update_index(doc_name, saved_files, filepath, sections)
+    print(f"  -> {SKILLS_INDEX} を更新しました")
+
+    # チェックポイント削除・キャッシュ更新
+    _remove_checkpoint(doc_name)
+    if use_cache:
+        _update_cache_entry(filepath, doc_name, len(sections), cache)
+        _save_cache(cache)
+
+    elapsed = time.time() - start_time
+    print(f"  完了（{len(sections)}セクション, {elapsed:.1f}秒）")
+
+
+def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple[str, str, str]]:
+    """セクションファイルを並列で書き出す。Returns: [(path, title, summary), ...]"""
+    def write_one(args):
+        i, section = args
         filename = f"section_{i+1:02d}.md"
         if section.get("title"):
             safe_title = re.sub(r"[^\w\u3000-\u9fff]", "_", section["title"])[:40]
             filename = f"{i+1:02d}_{safe_title}.md"
         fpath = os.path.join(skill_dir, filename)
+        content = section.get("content", "")
+        if section.get("title") and not content.startswith("#"):
+            content = f"# {section['title']}\n\n{content}"
         with open(fpath, "w", encoding="utf-8") as f:
-            content = section.get("content", "")
-            if section.get("title") and not content.startswith("#"):
-                content = f"# {section['title']}\n\n{content}"
             f.write(content)
-        saved_files.append((fpath, section.get("title", filename)))
+        summary = _extract_summary(content)
+        return (fpath, section.get("title", filename), summary)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(write_one, enumerate(sections)))
+
+    for fpath, title, _ in results:
         print(f"  -> {fpath}")
-
-    # index.md を更新
-    _update_index(doc_name, saved_files, filepath)
-    print(f"  -> {SKILLS_INDEX} を更新しました")
+    return results
 
 
-def _make_doc_name(filepath: str) -> str:
-    """ファイルパスからドキュメント名を生成する。"""
-    base = os.path.splitext(os.path.basename(filepath))[0]
-    # 英数字・日本語・ハイフン・アンダースコアのみ残す
-    name = re.sub(r"[^\w\u3000-\u9fff\-]", "_", base)
-    return name[:50]
+def _extract_summary(content: str) -> str:
+    """セクション内容から概要（先頭テキスト100文字）を抽出する。"""
+    for line in content.splitlines():
+        line = line.strip().lstrip("#").strip()
+        if line and not line.startswith("```") and not line.startswith("|"):
+            return line[:100]
+    return ""
+
+
+# ── PDF構造ベースのセクション分割 ─────────────────────────────────
+
+
+def split_sections_pdf(filepath: str, markdown: str) -> list[dict]:
+    """
+    PDF構造情報を使った高品質セクション分割。
+
+    優先順位:
+    1. TOC（目次）があればそれに基づいて分割
+    2. フォントサイズベースの見出し検出
+    3. ページベース分割（フォールバック）
+    """
+    try:
+        from readers.pdf import extract_toc, detect_headings_by_font
+    except ImportError:
+        return split_sections(markdown)
+
+    # 1. TOC取得を試行
+    toc = extract_toc(filepath)
+    if toc and len(toc) >= 3:
+        print(f"  TOC検出（{len(toc)}項目）— TOCベースで分割", file=sys.stderr)
+        sections = _split_by_toc(markdown, toc)
+        if sections:
+            return sections
+
+    # 2. フォントサイズベースの見出し検出
+    headings = detect_headings_by_font(filepath)
+    if headings and len(headings) >= 3:
+        print(f"  見出し検出（{len(headings)}件）— フォントサイズベースで分割", file=sys.stderr)
+        sections = _split_by_detected_headings(markdown, headings)
+        if sections:
+            return sections
+
+    # 3. ページベース分割
+    print("  TOC/見出し検出なし — ページベースで分割", file=sys.stderr)
+    sections = _split_by_pages(markdown, PAGES_PER_SECTION_FALLBACK)
+    if sections:
+        return sections
+
+    # 最終フォールバック: 従来のH1/H2分割
+    return split_sections(markdown)
+
+
+def _split_by_toc(markdown: str, toc: list[tuple[int, str, int]]) -> list[dict]:
+    """
+    TOC情報に基づいてMarkdownを分割する。
+
+    pymupdf4llmの出力には '## Page N' や '# Title' が含まれる。
+    TOCのタイトルをMarkdown内で検索し、その位置で分割する。
+    """
+    lines = markdown.splitlines(keepends=True)
+    total_len = len(markdown)
+
+    # TOCタイトルの出現位置をMarkdown内で検索
+    split_points = []
+    for level, title, page_num in toc:
+        if level > 2:
+            continue  # H1/H2相当のみ使用
+        clean_title = title.strip()
+        if not clean_title:
+            continue
+        # Markdown内でこのタイトルを探す
+        # 完全一致または部分一致で検索
+        pattern = re.compile(
+            r"^#{1,3}\s+" + re.escape(clean_title),
+            re.MULTILINE,
+        )
+        match = pattern.search(markdown)
+        if match:
+            split_points.append({
+                "pos": match.start(),
+                "title": clean_title,
+                "level": level,
+            })
+            continue
+
+        # パターン一致しない場合、タイトル文字列そのものを検索
+        idx = markdown.find(clean_title)
+        if idx >= 0:
+            # 行頭を見つける
+            line_start = markdown.rfind("\n", 0, idx)
+            line_start = 0 if line_start < 0 else line_start + 1
+            split_points.append({
+                "pos": line_start,
+                "title": clean_title,
+                "level": level,
+            })
+
+    if not split_points:
+        return []
+
+    # 位置でソート・重複除去
+    split_points.sort(key=lambda x: x["pos"])
+    deduped = [split_points[0]]
+    for sp in split_points[1:]:
+        if sp["pos"] - deduped[-1]["pos"] > 100:
+            deduped.append(sp)
+    split_points = deduped
+
+    # セクション生成
+    sections = []
+    # 先頭のプリアンブル
+    if split_points[0]["pos"] > 100:
+        preamble = markdown[:split_points[0]["pos"]].strip()
+        if preamble:
+            sections.append({"title": "概要", "content": preamble})
+
+    for i, sp in enumerate(split_points):
+        start = sp["pos"]
+        end = split_points[i + 1]["pos"] if i + 1 < len(split_points) else total_len
+        content = markdown[start:end].strip()
+        if content:
+            sections.append({"title": sp["title"], "content": content})
+
+    return sections
+
+
+def _split_by_detected_headings(markdown: str, headings: list[dict]) -> list[dict]:
+    """
+    フォントサイズ解析で検出した見出しでMarkdownを分割する。
+    """
+    # 見出しテキストの出現位置をMarkdown内で検索
+    split_points = []
+    for heading in headings:
+        if heading["level"] > 2:
+            continue
+        text = heading["text"].strip()
+        if not text or len(text) < 2:
+            continue
+        idx = markdown.find(text)
+        if idx >= 0:
+            line_start = markdown.rfind("\n", 0, idx)
+            line_start = 0 if line_start < 0 else line_start + 1
+            split_points.append({
+                "pos": line_start,
+                "title": text,
+                "level": heading["level"],
+            })
+
+    if not split_points:
+        return []
+
+    # 位置でソート・重複除去
+    split_points.sort(key=lambda x: x["pos"])
+    deduped = [split_points[0]]
+    for sp in split_points[1:]:
+        if sp["pos"] - deduped[-1]["pos"] > 100:
+            deduped.append(sp)
+    split_points = deduped
+
+    total_len = len(markdown)
+    sections = []
+
+    if split_points[0]["pos"] > 100:
+        preamble = markdown[:split_points[0]["pos"]].strip()
+        if preamble:
+            sections.append({"title": "概要", "content": preamble})
+
+    for i, sp in enumerate(split_points):
+        start = sp["pos"]
+        end = split_points[i + 1]["pos"] if i + 1 < len(split_points) else total_len
+        content = markdown[start:end].strip()
+        if content:
+            sections.append({"title": sp["title"], "content": content})
+
+    return sections
+
+
+def _split_by_pages(markdown: str, pages_per_section: int) -> list[dict]:
+    """
+    ページマーカー（## Page N）でMarkdownを分割する。
+
+    pymupdf4llmおよびfitzフォールバックは '## Page N' マーカーを出力する。
+    """
+    page_pattern = re.compile(r"^##\s+Page\s+(\d+)", re.MULTILINE)
+    matches = list(page_pattern.finditer(markdown))
+
+    if not matches:
+        return []
+
+    # pages_per_section ページごとにグルーピング
+    sections = []
+    group_start = 0
+    group_start_page = 1
+
+    for i, match in enumerate(matches):
+        page_num = int(match.group(1))
+        # グループ内のページ数がしきい値に達したら分割
+        if i > 0 and (page_num - group_start_page) >= pages_per_section:
+            content = markdown[group_start:match.start()].strip()
+            if content:
+                sections.append({
+                    "title": f"Pages {group_start_page}-{page_num - 1}",
+                    "content": content,
+                })
+            group_start = match.start()
+            group_start_page = page_num
+
+    # 最後のグループ
+    content = markdown[group_start:].strip()
+    if content:
+        last_page = int(matches[-1].group(1)) if matches else group_start_page
+        sections.append({
+            "title": f"Pages {group_start_page}-{last_page}",
+            "content": content,
+        })
+
+    return sections
+
+
+# ── 従来のMarkdownベースセクション分割 ────────────────────────────
 
 
 def split_sections(markdown: str) -> list[dict]:
@@ -130,12 +525,10 @@ def split_sections(markdown: str) -> list[dict]:
 
     Returns: [{"title": str, "content": str}]
     """
-    # H1/H2 の区切りを検出
     pattern = re.compile(r"^(#{1,2})\s+(.+)$", re.MULTILINE)
     matches = list(pattern.finditer(markdown))
 
     if not matches:
-        # 見出しがない場合は全体を1セクションとして返す
         return [{"title": "", "content": markdown}]
 
     sections = []
@@ -146,7 +539,6 @@ def split_sections(markdown: str) -> list[dict]:
         content = markdown[start:end].strip()
         sections.append({"title": title, "content": content})
 
-    # 先頭の見出し前にコンテンツがある場合
     if matches[0].start() > 0:
         preamble = markdown[:matches[0].start()].strip()
         if preamble:
@@ -158,9 +550,7 @@ def split_sections(markdown: str) -> list[dict]:
 def merge_small_sections(
     sections: list[dict], min_chars: int = SECTION_MIN_CHARS
 ) -> list[dict]:
-    """
-    min_chars未満の小セクションを前のセクションに統合する。
-    """
+    """min_chars未満の小セクションを前のセクションに統合する。"""
     if not sections:
         return sections
 
@@ -168,7 +558,6 @@ def merge_small_sections(
     for section in sections[1:]:
         content = section.get("content", "")
         if len(content) < min_chars and merged:
-            # 前のセクションに追記
             prev = merged[-1]
             prev["content"] = prev["content"] + "\n\n" + content
         else:
@@ -179,17 +568,13 @@ def merge_small_sections(
 def split_large_sections(
     sections: list[dict], max_chars: int = SECTION_MAX_CHARS
 ) -> list[dict]:
-    """
-    max_chars超えの大セクションを分割する。
-    """
+    """max_chars超えの大セクションを分割する。"""
     result = []
     for section in sections:
         content = section.get("content", "")
         if len(content) <= max_chars:
             result.append(section)
             continue
-
-        # 段落境界で分割
         title = section.get("title", "")
         parts = _split_by_paragraphs(content, max_chars)
         for i, part in enumerate(parts):
@@ -221,10 +606,11 @@ def _split_by_paragraphs(text: str, max_chars: int) -> list[str]:
     return parts
 
 
+# ── LLM構造化 ─────────────────────────────────────────────────────
+
+
 def _llm_structure(sections: list[dict], doc_name: str) -> list[dict]:
-    """
-    LLMを使って各セクションを構造化する（要約・タグ付与）。
-    """
+    """LLMを使って各セクションを構造化する（要約・タグ付与）。"""
     import dify_client
 
     structured = []
@@ -261,13 +647,27 @@ def _llm_structure(sections: list[dict], doc_name: str) -> list[dict]:
     return structured
 
 
+# ── ユーティリティ ────────────────────────────────────────────────
+
+
+def _make_doc_name(filepath: str) -> str:
+    """ファイルパスからドキュメント名を生成する。"""
+    base = os.path.splitext(os.path.basename(filepath))[0]
+    name = re.sub(r"[^\w\u3000-\u9fff\-]", "_", base)
+    return name[:50]
+
+
 def _update_index(
     doc_name: str,
-    saved_files: list[tuple[str, str]],
+    saved_files: list[tuple[str, str, str]],
     source_path: str,
+    sections: list[dict] | None = None,
 ) -> None:
-    """skills/index.md にスキルエントリを追記/更新する。"""
-    # 既存のindex.mdを読み込む
+    """
+    skills/index.md にスキルエントリを追記/更新する。
+
+    各セクションに概要・文字数情報を付与して品質を向上。
+    """
     existing = ""
     if os.path.isfile(SKILLS_INDEX):
         with open(SKILLS_INDEX, encoding="utf-8") as f:
@@ -280,16 +680,22 @@ def _update_index(
     )
     existing = section_pattern.sub("", existing).strip()
 
-    # 新しいエントリを追加
+    # 新しいエントリを追加（概要・サイズ情報付き）
     entries = [f"\n### {doc_name}\n"]
     entries.append(f"*ソース: {source_path}*\n")
-    for fpath, title in saved_files:
+
+    for i, (fpath, title, summary) in enumerate(saved_files):
         rel = os.path.relpath(fpath, SKILLS_DIR)
-        entries.append(f"- [{title or rel}]({rel})")
+        # セクションの文字数
+        char_count = 0
+        if sections and i < len(sections):
+            char_count = len(sections[i].get("content", ""))
+        size_info = f" ({char_count:,}字)" if char_count else ""
+        summary_text = f" — {summary}" if summary else ""
+        entries.append(f"- [{title or rel}]({rel}){size_info}{summary_text}")
 
     new_content = existing + "\n" + "\n".join(entries) + "\n"
 
-    # index.mdのヘッダーがなければ追加
     if not new_content.startswith("# スキルインデックス"):
         new_content = "# スキルインデックス\n\n" + new_content.lstrip()
 
