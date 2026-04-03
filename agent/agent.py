@@ -12,7 +12,7 @@ import sys
 
 import compactor
 import dify_client
-from config import MAX_TURNS
+from config import LLM_BACKEND, MAX_TURNS
 from system_prompt import build_system_prompt
 from tool_registry import TOOL_DEFINITIONS, execute_tool
 
@@ -102,6 +102,9 @@ def agent_loop(
     from tools.context import set_context_ref
     set_context_ref(messages, system_prompt)
 
+    # Dify バックエンドの会話ID管理
+    conversation_id = ""
+
     for turn in range(1, MAX_TURNS + 1):
         if verbose:
             ratio = compactor.usage_ratio(messages)
@@ -112,20 +115,31 @@ def agent_loop(
             if verbose:
                 print("[compaction] triggered", file=sys.stderr)
             messages = compactor.compact(messages, system_prompt)
+            # Dify: コンパクション後は新しい会話を開始
+            conversation_id = ""
 
         # LLM呼び出し
         try:
-            response = dify_client.chat(messages, tools=TOOL_DEFINITIONS)
+            response = dify_client.chat(
+                messages,
+                tools=TOOL_DEFINITIONS,
+                conversation_id=conversation_id,
+            )
         except RuntimeError as e:
             return f"[エラー] LLM呼び出し失敗: {e}"
+
+        # Dify: conversation_id を更新
+        if response.conversation_id:
+            conversation_id = response.conversation_id
 
         # ツール呼び出しなし → 最終回答
         if not response.has_tool_calls:
             return response.answer
 
-        # assistantメッセージを追加（tool_calls形式）
+        # assistantメッセージを追加
         assistant_msg: dict = {"role": "assistant", "content": response.content or ""}
-        if response.tool_calls:
+        if LLM_BACKEND == "ollama" and response.tool_calls:
+            # Ollama: OpenAI形式の tool_calls を保持
             assistant_msg["tool_calls"] = [
                 {
                     "id": tc["id"],
@@ -143,7 +157,7 @@ def agent_loop(
         for call in response.tool_calls:
             tool_name = call["name"]
             tool_args = call["args"]
-            tool_id = call["id"]
+            tool_id = call.get("id", "call_0")
 
             if verbose:
                 print(f"  {_format_tool_call(tool_name, tool_args)}", file=sys.stderr)
@@ -151,11 +165,20 @@ def agent_loop(
             result = execute_tool(tool_name, tool_args)
             reminder = TOOL_REMINDERS.get(tool_name, "")
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_id,
-                "content": result + reminder,
-            })
+            if LLM_BACKEND == "ollama":
+                # Ollama: OpenAI形式の tool 結果
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "content": result + reminder,
+                })
+            else:
+                # Dify: テキスト形式の tool 結果（name付きで _build_query が整形）
+                messages.append({
+                    "role": "tool",
+                    "name": tool_name,
+                    "content": result + reminder,
+                })
 
     return f"[エラー] MAX_TURNS ({MAX_TURNS}) に達しました。タスクが完了しませんでした。"
 
@@ -170,7 +193,7 @@ def main() -> None:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="ナレッジエージェント（Ollamaバックエンド）")
+    parser = argparse.ArgumentParser(description="ナレッジエージェント")
     parser.add_argument("query", nargs="?", help="質問・指示テキスト")
     parser.add_argument("--quiet", "-q", action="store_true", help="ターン情報を非表示")
     args = parser.parse_args()

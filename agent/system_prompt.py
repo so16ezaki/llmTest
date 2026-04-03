@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 
-from config import MEMORY_FILE, MEMORY_LIMIT_BYTES, SKILLS_INDEX
+from config import LLM_BACKEND, MEMORY_FILE, MEMORY_LIMIT_BYTES, SKILLS_INDEX
 
 
 _BASE_PROMPT = """\
@@ -47,6 +47,12 @@ def build_system_prompt(todo_content: str = "") -> str:
     現在のスキルインデックス・メモリ・TODOを埋め込んだシステムプロンプトを生成する。
     """
     parts = [_BASE_PROMPT]
+
+    # Difyバックエンドの場合、ツール定義をプロンプトに含める
+    # (Difyは function calling 非対応のため、テキスト+XMLで呼び出す)
+    if LLM_BACKEND == "dify":
+        from tool_registry import TOOL_DEFINITIONS_TEXT
+        parts.append(f"\n{TOOL_DEFINITIONS_TEXT}")
 
     # skills/index.md
     index_content = _read_file_safe(SKILLS_INDEX)
