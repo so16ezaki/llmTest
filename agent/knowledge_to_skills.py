@@ -223,7 +223,7 @@ def _split_by_paragraphs(text: str, max_chars: int) -> list[str]:
 
 def _llm_structure(sections: list[dict], doc_name: str) -> list[dict]:
     """
-    Ollama LLMを使って各セクションを構造化する（要約・タグ付与）。
+    LLMを使って各セクションを構造化する（要約・タグ付与）。
     """
     import dify_client
 

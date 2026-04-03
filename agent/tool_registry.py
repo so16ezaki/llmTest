@@ -329,6 +329,47 @@ TOOL_DEFINITIONS: list[dict] = [
 ]
 
 
+# ── ツール定義テキスト（Difyバックエンド用）────────────────────────
+
+def _build_tool_definitions_text() -> str:
+    """TOOL_DEFINITIONS から LLM向けテキスト形式のツール説明を生成する。
+
+    Difyバックエンドでは function calling が使えないため、
+    ツール定義をテキストとしてシステムプロンプトに含める。
+    LLMはXMLタグ形式でツール呼び出しを出力する。
+    """
+    lines = [
+        "## 利用可能なツール\n",
+        "ツールを呼び出すには以下のXML形式を使ってください:",
+        "```",
+        "<tool_call>",
+        "  <name>ツール名</name>",
+        '  <args>{"引数名": "値"}</args>',
+        "</tool_call>",
+        "```\n",
+        "最終回答時はツール呼び出しなしのテキストのみ返してください。\n",
+    ]
+    for tool_def in TOOL_DEFINITIONS:
+        fn = tool_def["function"]
+        lines.append(f"### {fn['name']}")
+        lines.append(fn["description"])
+        props = fn["parameters"].get("properties", {})
+        required = fn["parameters"].get("required", [])
+        if props:
+            for pname, pinfo in props.items():
+                req = "必須" if pname in required else "省略可"
+                ptype = pinfo.get("type", "")
+                desc = pinfo.get("description", "")
+                lines.append(f"- {pname} ({ptype}, {req}): {desc}")
+        else:
+            lines.append("- 引数なし")
+        lines.append("")
+    return "\n".join(lines)
+
+
+TOOL_DEFINITIONS_TEXT: str = _build_tool_definitions_text()
+
+
 # ── ツールディスパッチャー ────────────────────────────────────────
 
 # ファイルパスを使うツールと、チェック対象の引数名・操作種別のマッピング

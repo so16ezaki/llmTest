@@ -2,8 +2,9 @@
 config.py — Dify ナレッジエージェント 設定
 全設定値はここで一元管理。環境変数でオーバーライド可能。
 
-Dify APIの代わりにOllamaをLLMバックエンドとして使用する。
-OllamaはOpenAI互換APIを /v1/chat/completions で提供する。
+LLM_BACKEND で Ollama / Dify を切り替える。
+  - "ollama": OllamaのOpenAI互換API (/v1/chat/completions)
+  - "dify":   Dify Cloud API (/v1/chat-messages, SSE streaming)
 
 NOTE: .envファイルは意図的に読み込まない。
       python-dotenv等のライブラリは使用せず、os.getenv()でプロセス環境変数のみ参照する。
@@ -14,14 +15,19 @@ NOTE: .envファイルは意図的に読み込まない。
 import os
 
 
+# ── LLMバックエンド選択 ──────────────────────────────────────
+LLM_BACKEND: str = os.getenv("LLM_BACKEND", "ollama")  # "ollama" | "dify"
+
 # ── Ollama API ────────────────────────────────────────────
 # OllamaのOpenAI互換エンドポイント
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:4b")
 
-# 後方互換用エイリアス
-DIFY_API_URL: str = OLLAMA_BASE_URL + "/v1"
-DIFY_API_KEY: str = "ollama"  # Ollamaはキー不要だがOpenAI互換のため設定
+# ── Dify Cloud API ────────────────────────────────────────
+DIFY_API_URL: str = os.getenv("DIFY_API_URL", "https://api.dify.ai/v1")
+DIFY_API_KEY: str = os.getenv("DIFY_API_KEY", "")
+DIFY_RESPONSE_MODE: str = os.getenv("DIFY_RESPONSE_MODE", "streaming")
+DIFY_USER: str = os.getenv("DIFY_USER", "agent-user")
 
 # ── エージェントループ ────────────────────────────────────
 MAX_TURNS: int = int(os.getenv("MAX_TURNS", "30"))
