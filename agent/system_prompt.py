@@ -34,6 +34,9 @@ _BASE_PROMPT = """\
 - キーワードで横断検索したい場合は keyword_search を使ってください。
 - コード解析は scan_project → read_source → extract_structure の順で進めてください。
 - 成果物は write_file で保存してください。
+- 部分処理されたドキュメントがある場合、get_knowledge_coverageで未処理範囲を確認できます。
+- 未処理部分の情報が必要なら read_pdf_pages で直接読み取れます（自動でmd変換されます）。
+- 重要な情報を見つけたら convert_pages_to_skill でスキルファイルに変換してください。
 
 ## コンテキスト管理
 

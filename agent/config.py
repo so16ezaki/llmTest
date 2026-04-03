@@ -80,6 +80,14 @@ PDF_WORKERS: int = int(os.getenv("PDF_WORKERS", "4"))
 # ページベース分割時のセクションあたりページ数（TOC/フォントサイズ検出失敗時のフォールバック）
 PAGES_PER_SECTION_FALLBACK: int = int(os.getenv("PAGES_PER_SECTION_FALLBACK", "10"))
 
+# ── ナレッジ処理上限 ─────────────────────────────────────
+# 1回の取り込みで処理するスキルの累計トークン数上限（0 = 無制限）
+# 上限到達時はセクション境界で停止し、残りは未処理として記録する
+KNOWLEDGE_MAX_TOKENS: int = int(os.getenv("KNOWLEDGE_MAX_TOKENS", "0"))
+
+# エージェント実行時のPDF直接読み取り最大ページ数（1回のツール呼び出しあたり）
+PDF_RAW_READ_MAX_PAGES: int = int(os.getenv("PDF_RAW_READ_MAX_PAGES", "50"))
+
 # ── キャッシュ ────────────────────────────────────────────
 SKILLS_CACHE_FILE: str = os.getenv("SKILLS_CACHE_FILE", ".skills_cache.json")
 ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "1") == "1"

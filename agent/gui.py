@@ -567,18 +567,20 @@ class KnowledgeManagerTab(ttk.Frame):
         inner = _fr(tree_wrap, bg="surface")
         inner.pack(fill="both", expand=True, padx=1, pady=1)
 
-        cols = ("files", "size", "source")
+        cols = ("files", "size", "coverage", "source")
         self._tree = ttk.Treeview(
             inner, columns=cols, selectmode="extended",
             style="Mgr.Treeview", show="headings tree")
-        self._tree.heading("#0",     text="ナレッジ名", anchor="w")
-        self._tree.heading("files",  text="ファイル数", anchor="center")
-        self._tree.heading("size",   text="サイズ",     anchor="e")
-        self._tree.heading("source", text="取り込み元", anchor="w")
-        self._tree.column("#0",     width=200, minwidth=120, stretch=True)
-        self._tree.column("files",  width=80,  minwidth=60,  stretch=False, anchor="center")
-        self._tree.column("size",   width=90,  minwidth=70,  stretch=False, anchor="e")
-        self._tree.column("source", width=300, minwidth=100, stretch=True)
+        self._tree.heading("#0",       text="ナレッジ名",   anchor="w")
+        self._tree.heading("files",    text="ファイル数",   anchor="center")
+        self._tree.heading("size",     text="サイズ",       anchor="e")
+        self._tree.heading("coverage", text="カバレッジ",   anchor="center")
+        self._tree.heading("source",   text="取り込み元",   anchor="w")
+        self._tree.column("#0",       width=200, minwidth=120, stretch=True)
+        self._tree.column("files",    width=80,  minwidth=60,  stretch=False, anchor="center")
+        self._tree.column("size",     width=90,  minwidth=70,  stretch=False, anchor="e")
+        self._tree.column("coverage", width=100, minwidth=80,  stretch=False, anchor="center")
+        self._tree.column("source",   width=300, minwidth=100, stretch=True)
 
         vsb = ttk.Scrollbar(inner, orient="vertical",   command=self._tree.yview)
         hsb = ttk.Scrollbar(inner, orient="horizontal", command=self._tree.xview)
@@ -674,6 +676,7 @@ class KnowledgeManagerTab(ttk.Frame):
     # ── データ ──
 
     def refresh(self):
+        import json as _json
         from config import SKILLS_DIR, SKILLS_INDEX
         for item in self._tree.get_children():
             self._tree.delete(item)
@@ -689,11 +692,29 @@ class KnowledgeManagerTab(ttk.Frame):
             if not os.path.isdir(d): continue
             mds   = [f for f in os.listdir(d) if f.endswith(".md")]
             total = sum(os.path.getsize(os.path.join(d, f)) for f in mds)
-            rows.append((name, len(mds), total, sources.get(name, "")))
-        for name, nf, nb, src in rows:
+            # カバレッジ情報
+            coverage_text = "\u2014"
+            cov_path = os.path.join(d, ".coverage.json")
+            if os.path.isfile(cov_path):
+                try:
+                    with open(cov_path, encoding="utf-8") as _f:
+                        cov = _json.load(_f)
+                    if cov.get("partial"):
+                        tp = cov.get("total_pages", 0)
+                        pp = cov.get("processed_pages", [])
+                        if pp and tp:
+                            p_count = pp[0][1] - pp[0][0] + 1
+                            pct = p_count * 100 // tp
+                            coverage_text = f"{pct}% ({pp[0][1]}/{tp}p)"
+                    else:
+                        coverage_text = "100%"
+                except (ValueError, OSError, KeyError):
+                    pass
+            rows.append((name, len(mds), total, coverage_text, sources.get(name, "")))
+        for name, nf, nb, cov_text, src in rows:
             self._tree.insert("", "end", iid=name,
                 text=f"  {name}",
-                values=(nf, _fmt_size(nb), src))
+                values=(nf, _fmt_size(nb), cov_text, src))
         self._set_status(len(rows), 0)
 
     # ── 選択操作 ──

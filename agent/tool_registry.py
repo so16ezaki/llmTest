@@ -92,6 +92,77 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # ── ナレッジカバレッジ・PDF直接読み取り ─────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "get_knowledge_coverage",
+            "description": "ドキュメントの処理カバレッジ情報を返す。"
+                           "どのページが処理済みか、未処理部分のTOCを確認できる。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_name": {
+                        "type": "string",
+                        "description": "ドキュメント名（省略時は全ドキュメントの概要）",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_pdf_pages",
+            "description": "PDFの指定ページ範囲を直接読み取りMarkdownに変換して返す。"
+                           "未処理ページの内容を確認するのに使用する。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_name": {
+                        "type": "string",
+                        "description": "ドキュメント名（skills/配下のディレクトリ名）",
+                    },
+                    "start_page": {
+                        "type": "integer",
+                        "description": "開始ページ番号（1始まり）",
+                    },
+                    "end_page": {
+                        "type": "integer",
+                        "description": "終了ページ番号（1始まり、この番号を含む）",
+                    },
+                },
+                "required": ["doc_name", "start_page", "end_page"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "convert_pages_to_skill",
+            "description": "PDFの指定ページ範囲を正式なスキルファイルに変換して保存する。"
+                           "read_pdf_pagesで重要な内容を見つけた場合に使用する。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "doc_name": {
+                        "type": "string",
+                        "description": "ドキュメント名（skills/配下のディレクトリ名）",
+                    },
+                    "start_page": {
+                        "type": "integer",
+                        "description": "開始ページ番号（1始まり）",
+                    },
+                    "end_page": {
+                        "type": "integer",
+                        "description": "終了ページ番号（1始まり、この番号を含む）",
+                    },
+                },
+                "required": ["doc_name", "start_page", "end_page"],
+            },
+        },
+    },
     # ── コード解析 ────────────────────────────────────────────────
     {
         "type": "function",
@@ -410,6 +481,9 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
         "skill_search":     ("tools.search",          "skill_search"),
         "read_skill":       ("tools.search",          "read_skill"),
         "keyword_search":   ("tools.search",          "keyword_search"),
+        "get_knowledge_coverage": ("tools.knowledge", "get_knowledge_coverage"),
+        "read_pdf_pages":         ("tools.knowledge", "read_pdf_pages"),
+        "convert_pages_to_skill": ("tools.knowledge", "convert_pages_to_skill"),
         "scan_project":     ("tools.code",            "scan_project"),
         "read_source":      ("tools.code",            "read_source"),
         "grep_source":      ("tools.code",            "grep_source"),

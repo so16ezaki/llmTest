@@ -6,6 +6,7 @@ list_skills, skill_search, read_skill, keyword_search を実装する。
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -93,7 +94,8 @@ def skill_search(query: str) -> str:
     results.sort(key=lambda x: x[0], reverse=True)
 
     if not results:
-        return f"「{query}」に関連するスキルが見つかりませんでした。keyword_searchで横断検索してみてください。"
+        hint = _get_partial_docs_hint()
+        return f"「{query}」に関連するスキルが見つかりませんでした。keyword_searchで横断検索してみてください。{hint}"
 
     lines = [f"## 「{query}」に関連するスキル（関連度順）\n"]
     for score, line in results[:10]:
@@ -167,7 +169,8 @@ def keyword_search(
                 results.append(f"\n### {rel}\n" + "\n---\n".join(matches))
 
     if not results:
-        return f"「{pattern}」はスキルファイル内に見つかりませんでした。"
+        hint = _get_partial_docs_hint()
+        return f"「{pattern}」はスキルファイル内に見つかりませんでした。{hint}"
 
     header = f"## keyword_search: `{pattern}`\n\n{len(results)}ファイルでマッチ\n"
     return header + "\n".join(results)
@@ -227,3 +230,39 @@ def _read_file(path: str) -> str | None:
             return f.read()
     except OSError:
         return None
+
+
+def _get_partial_docs_hint() -> str:
+    """部分処理されたドキュメントがあればヒント文字列を返す。"""
+    if not os.path.isdir(SKILLS_DIR):
+        return ""
+
+    hints = []
+    for entry in os.scandir(SKILLS_DIR):
+        if not entry.is_dir():
+            continue
+        coverage_path = os.path.join(entry.path, ".coverage.json")
+        if not os.path.isfile(coverage_path):
+            continue
+        try:
+            with open(coverage_path, encoding="utf-8") as f:
+                cov = json.load(f)
+            if cov.get("partial"):
+                processed = cov.get("processed_pages", [])
+                total = cov.get("total_pages", "?")
+                if processed:
+                    p = processed[0]
+                    hints.append(f"  - {entry.name}: ページ {p[0]}-{p[1]}/{total} 処理済み")
+                else:
+                    hints.append(f"  - {entry.name}: 部分処理済み（{total}ページ）")
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    if not hints:
+        return ""
+    return (
+        "\n\n[hint] 以下のドキュメントは部分的にしか処理されていません。"
+        "未処理部分に情報がある可能性があります。\n"
+        "get_knowledge_coverageで詳細を確認し、read_pdf_pagesで直接読み取れます。\n"
+        + "\n".join(hints)
+    )

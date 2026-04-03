@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from config import (
     ENABLE_CACHE,
+    KNOWLEDGE_MAX_TOKENS,
     PAGES_PER_SECTION_FALLBACK,
     SECTION_MAX_CHARS,
     SECTION_MIN_CHARS,
@@ -185,6 +186,132 @@ def _remove_checkpoint(doc_name: str) -> None:
         os.remove(path)
 
 
+# ── トークン数上限 ────────────────────────────────────────────────
+
+
+def _apply_token_limit(
+    sections: list[dict], max_tokens: int
+) -> tuple[list[dict], list[dict]]:
+    """
+    トークン数上限でセクションを切り分ける。
+
+    累計トークン数がmax_tokensを超えたセクション境界で停止する。
+    最低1セクションは処理する。
+
+    Returns: (to_process, remaining)
+    """
+    if max_tokens <= 0:
+        return sections, []
+
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+    except ImportError:
+        # tiktokenがなければ文字数÷4で概算
+        enc = None
+
+    total = 0
+    for i, section in enumerate(sections):
+        content = section.get("content", "")
+        if enc:
+            tokens = len(enc.encode(content))
+        else:
+            tokens = len(content) // 4
+        if total + tokens > max_tokens and i > 0:
+            return sections[:i], sections[i:]
+        total += tokens
+    return sections, []
+
+
+# ── カバレッジ管理 ────────────────────────────────────────────────
+
+
+def _coverage_path(doc_name: str) -> str:
+    return os.path.join(SKILLS_DIR, doc_name, ".coverage.json")
+
+
+def load_coverage(doc_name: str) -> dict | None:
+    """カバレッジ情報を読み込む。tools/knowledge.pyからも使用。"""
+    path = _coverage_path(doc_name)
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
+def _save_coverage(doc_name: str, data: dict) -> None:
+    path = _coverage_path(doc_name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _merge_page_ranges(existing: list[list[int]], new_range: list[int]) -> list[list[int]]:
+    """ページ範囲をマージする。[[1,100],[200,300]] + [101,199] → [[1,300]]"""
+    all_ranges = existing + [new_range]
+    all_ranges.sort(key=lambda r: r[0])
+    merged = [all_ranges[0]]
+    for r in all_ranges[1:]:
+        if r[0] <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], r[1])
+        else:
+            merged.append(r)
+    return merged
+
+
+def _compute_unprocessed(processed: list[list[int]], total_pages: int) -> list[list[int]]:
+    """処理済み範囲から未処理範囲を算出する。"""
+    if not processed:
+        return [[1, total_pages]]
+    unprocessed = []
+    prev_end = 0
+    for start, end in sorted(processed, key=lambda r: r[0]):
+        if start > prev_end + 1:
+            unprocessed.append([prev_end + 1, start - 1])
+        prev_end = max(prev_end, end)
+    if prev_end < total_pages:
+        unprocessed.append([prev_end + 1, total_pages])
+    return unprocessed
+
+
+def _estimate_page_range(
+    sections: list[dict],
+    total_pages: int,
+    toc: list | None = None,
+) -> list[int]:
+    """セクションリストがカバーするページ範囲を推定する。Returns: [start, end]"""
+    if not sections:
+        return [1, 1]
+
+    # "Pages X-Y" タイトルから直接パース
+    first_title = sections[0].get("title", "")
+    last_title = sections[-1].get("title", "")
+    start_page = 1
+    end_page = total_pages
+
+    page_match = re.match(r"Pages?\s+(\d+)", first_title)
+    if page_match:
+        start_page = int(page_match.group(1))
+    page_match = re.search(r"(\d+)$", last_title) if "Page" in last_title else None
+    if page_match:
+        end_page = int(page_match.group(1))
+    elif toc and len(sections) < len(toc):
+        # TOCベースで推定: 処理済みセクション数に対応するTOCエントリのページ番号
+        processed_toc = [t for t in toc if t[0] <= 2]  # H1/H2相当のみ
+        if len(processed_toc) > len(sections):
+            end_page = processed_toc[len(sections)][2] - 1
+    else:
+        # 比例推定
+        total_chars = sum(len(s.get("content", "")) for s in sections)
+        # 概算: 5000ページPDFの全体文字数を仮定して比率計算は不正確なのでtotal_pagesをそのまま使う
+        pass
+
+    return [max(1, start_page), min(total_pages, end_page)]
+
+
 # ── メイン処理 ────────────────────────────────────────────────────
 
 
@@ -251,6 +378,17 @@ def _process_file(
             "filepath": filepath,
         })
 
+    # トークン数上限を適用
+    all_sections = sections
+    sections, remaining = _apply_token_limit(sections, KNOWLEDGE_MAX_TOKENS)
+    is_partial = bool(remaining)
+    if is_partial:
+        print(
+            f"  トークン上限到達: {len(sections)}/{len(all_sections)}セクションを処理"
+            f"（残り{len(remaining)}セクション）",
+            file=sys.stderr,
+        )
+
     # 保存
     print(f"  [4/4] {len(sections)}セクションを書き出し...", file=sys.stderr)
     skill_dir = os.path.join(SKILLS_DIR, doc_name)
@@ -258,8 +396,36 @@ def _process_file(
 
     saved_files = _write_sections_parallel(sections, skill_dir)
 
+    # カバレッジ情報を構築・保存
+    total_pages = 0
+    toc = []
+    if is_pdf:
+        try:
+            from readers.pdf import extract_toc, get_page_count
+            total_pages = get_page_count(filepath)
+            toc = extract_toc(filepath)
+        except Exception:
+            pass
+
+    processed_range = _estimate_page_range(sections, total_pages, toc) if total_pages else [0, 0]
+    processed_pages = [processed_range] if total_pages else []
+    unprocessed = _compute_unprocessed(processed_pages, total_pages) if total_pages else []
+
+    coverage = {
+        "source_path": os.path.abspath(filepath),
+        "total_pages": total_pages,
+        "processed_pages": processed_pages,
+        "unprocessed_ranges": unprocessed,
+        "processed_sections": len(sections),
+        "total_sections": len(all_sections),
+        "partial": is_partial,
+        "toc": toc,
+        "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    _save_coverage(doc_name, coverage)
+
     # index.md を更新
-    _update_index(doc_name, saved_files, filepath, sections)
+    _update_index(doc_name, saved_files, filepath, sections, coverage=coverage)
     print(f"  -> {SKILLS_INDEX} を更新しました")
 
     # チェックポイント削除・キャッシュ更新
@@ -269,7 +435,8 @@ def _process_file(
         _save_cache(cache)
 
     elapsed = time.time() - start_time
-    print(f"  完了（{len(sections)}セクション, {elapsed:.1f}秒）")
+    partial_note = "（部分処理）" if is_partial else ""
+    print(f"  完了{partial_note}（{len(sections)}セクション, {elapsed:.1f}秒）")
 
 
 def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple[str, str, str]]:
@@ -662,11 +829,13 @@ def _update_index(
     saved_files: list[tuple[str, str, str]],
     source_path: str,
     sections: list[dict] | None = None,
+    coverage: dict | None = None,
 ) -> None:
     """
     skills/index.md にスキルエントリを追記/更新する。
 
     各セクションに概要・文字数情報を付与して品質を向上。
+    部分処理の場合はカバレッジ情報と未処理TOCを表示。
     """
     existing = ""
     if os.path.isfile(SKILLS_INDEX):
@@ -684,15 +853,39 @@ def _update_index(
     entries = [f"\n### {doc_name}\n"]
     entries.append(f"*ソース: {source_path}*\n")
 
+    # 部分処理の場合はカバレッジ情報を表示
+    if coverage and coverage.get("partial"):
+        total_pages = coverage.get("total_pages", 0)
+        processed = coverage.get("processed_pages", [])
+        if processed and total_pages:
+            p_start, p_end = processed[0]
+            pct = (p_end - p_start + 1) * 100 // total_pages
+            entries.append(
+                f"*[部分処理] ページ {p_start}-{p_end} / {total_pages} 処理済み ({pct}%)。"
+                f"未処理部分は read_pdf_pages で読み取り可能。*\n"
+            )
+
     for i, (fpath, title, summary) in enumerate(saved_files):
         rel = os.path.relpath(fpath, SKILLS_DIR)
-        # セクションの文字数
         char_count = 0
         if sections and i < len(sections):
             char_count = len(sections[i].get("content", ""))
         size_info = f" ({char_count:,}字)" if char_count else ""
         summary_text = f" — {summary}" if summary else ""
         entries.append(f"- [{title or rel}]({rel}){size_info}{summary_text}")
+
+    # 未処理部分のTOCを表示
+    if coverage and coverage.get("partial"):
+        toc = coverage.get("toc", [])
+        unprocessed = coverage.get("unprocessed_ranges", [])
+        if toc and unprocessed:
+            up_start = unprocessed[0][0]
+            toc_entries = [t for t in toc if t[0] <= 2 and t[2] >= up_start]
+            if toc_entries:
+                entries.append("\n*未処理部分のTOC:*")
+                for level, title, page in toc_entries[:30]:
+                    indent = "  " if level > 1 else ""
+                    entries.append(f"{indent}- {title} (p.{page})")
 
     new_content = existing + "\n" + "\n".join(entries) + "\n"
 
