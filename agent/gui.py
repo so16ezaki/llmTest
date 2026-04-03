@@ -1081,9 +1081,41 @@ class AgentTab(ttk.Frame):
         threading.Thread(target=self._work, args=(query,), daemon=True).start()
 
     def _work(self, query):
+        import json as _json
+
         import agent as ag
         import sandbox
+        import tool_registry
+        from config import REQUIRE_WRITE_APPROVAL
+
         sandbox.set_allowed_roots(self._paths)
+
+        # 書き込み承認コールバック（GUIダイアログ）
+        if REQUIRE_WRITE_APPROVAL:
+            panel = self
+
+            def _approval_dialog(tool_name, operation, args):
+                """メインスレッドで承認ダイアログを表示する（スレッドセーフ）。"""
+                result = [False]
+                event = threading.Event()
+
+                def ask():
+                    args_str = _json.dumps(args, ensure_ascii=False, indent=2)[:200]
+                    result[0] = messagebox.askyesno(
+                        "操作の承認",
+                        f"ツール: {tool_name}\n"
+                        f"操作: {operation}\n\n"
+                        f"引数:\n{args_str}\n\n"
+                        "実行を許可しますか？",
+                    )
+                    event.set()
+
+                panel.after(0, ask)
+                event.wait()
+                return result[0]
+
+            tool_registry.set_approval_callback(_approval_dialog)
+
         old_err = sys.stderr
         sys.stderr = _StderrRouter(self._q)
         try:
@@ -1095,6 +1127,7 @@ class AgentTab(ttk.Frame):
         finally:
             sys.stderr = old_err
             sandbox.clear()
+            tool_registry.set_approval_callback(None)
             self._q.put(("__done__", ""))
 
     def _poll(self):

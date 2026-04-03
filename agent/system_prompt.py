@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import os
 
-from config import LLM_BACKEND, MEMORY_FILE, MEMORY_LIMIT_BYTES, SKILLS_INDEX
+from config import (
+    LLM_BACKEND,
+    MEMORY_FILE,
+    MEMORY_LIMIT_BYTES,
+    PROJECT_SUMMARY_KEY,
+    SKILLS_INDEX,
+)
 
 
 _BASE_PROMPT = """\
@@ -42,6 +48,43 @@ _BASE_PROMPT = """\
 
 - get_status でトークン使用状況を確認できます。
 - compact_now でコンテキストを手動圧縮できます。
+
+## サブエージェント
+
+複雑なタスクでは sub_agent ツールで専門エージェントに委任できます:
+- sub_agent(role="explorer"): ファイル探索・コード構造調査（読み取り専用）
+- sub_agent(role="planner"): 計画策定・TODO作成・メモリ管理
+- sub_agent(role="executor"): ファイル書き込み・編集実行
+
+各サブエージェントには十分なコンテキスト（ファイルパス、調査結果など）を渡してください。
+
+## 推奨ワークフロー
+
+複雑なタスクでは以下のフェーズで進めてください:
+
+1. **探索**: sub_agent(role="explorer") でファイル構成・コード構造を調査
+2. **計画**: sub_agent(role="planner") でTODO作成・作業計画を策定
+3. **実行**: sub_agent(role="executor") でファイル作成・編集を実行
+4. **検証**: explorerに再調査を依頼するか、直接ツールで成果を確認
+
+シンプルな質問にはサブエージェントを使わず直接回答してください。
+"""
+
+_AUTO_SUMMARY_PROMPT = """\
+
+## 初回プロジェクト探索
+
+永続メモリに project_summary が見つかりません。
+最初のタスクの前に、以下を実行してプロジェクト全体像を把握してください:
+
+1. sub_agent(role="explorer") で scan_project と extract_structure を実行
+2. 結果をもとに memory_write(key="project_summary") でプロジェクト概要を保存
+   - ディレクトリ構成と各ディレクトリの役割
+   - 主要モジュール/ファイルの責務
+   - データフロー・依存関係の概要
+   - コーディング規約（命名規則、言語、フレームワーク等）
+
+この概要は以後のセッションで自動的にロードされます。
 """
 
 
@@ -68,6 +111,10 @@ def build_system_prompt(todo_content: str = "") -> str:
     memory_content = _read_file_safe(MEMORY_FILE, max_bytes=MEMORY_LIMIT_BYTES)
     if memory_content:
         parts.append(f"\n## 永続メモリ (project_memory.md)\n\n{memory_content}")
+
+    # project_summary が未生成の場合、自動生成を促す
+    if not memory_content or PROJECT_SUMMARY_KEY not in memory_content:
+        parts.append(_AUTO_SUMMARY_PROMPT)
 
     # TODO
     if todo_content:

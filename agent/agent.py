@@ -12,7 +12,7 @@ import sys
 
 import compactor
 import dify_client
-from config import LLM_BACKEND, MAX_TURNS
+from config import LLM_BACKEND, MAX_TURNS, TOOL_RESULT_MAX_TOKENS
 from system_prompt import build_system_prompt
 from tool_registry import TOOL_DEFINITIONS, execute_tool
 
@@ -41,7 +41,33 @@ TOOL_REMINDERS: dict[str, str] = {
         "\n[reminder] 未処理ページの内容を確認するにはread_pdf_pagesを使ってください。",
     "convert_pages_to_skill":
         "\n[reminder] 変換が完了しました。keyword_searchやskill_searchで検索可能になりました。",
+    "sub_agent":
+        "\n[reminder] サブエージェントの結果を評価し、"
+        " 不十分な場合は追加の指示で再度委任してください。",
+    "read_source":
+        "\n[reminder] このファイルの依存関係にも注目してください。"
+        " 必要なら関連ファイルもread_sourceで確認してください。",
+    "write_file":
+        "\n[reminder] ファイルを書き出しました。"
+        " 内容に不足がないかread_sourceで確認してください。",
+    "edit_file":
+        "\n[reminder] 編集が完了しました。"
+        " read_sourceで変更結果を確認してください。",
+    "generate_skeleton":
+        "\n[reminder] スケルトンから全体構造を把握したら、"
+        " 重要な関数はread_sourceで実装を確認してください。",
+    "dependency_map":
+        "\n[reminder] 依存関係を把握したら、"
+        " 重要なモジュールをread_sourceやextract_structureで詳しく調べてください。",
 }
+
+
+def _pre_compact_result(result: str) -> str:
+    """ツール結果が長すぎる場合、先頭+末尾に切り詰める。"""
+    tokens = compactor.count_tokens(result)
+    if tokens > TOOL_RESULT_MAX_TOKENS:
+        return compactor.truncate_to_tokens(result, TOOL_RESULT_MAX_TOKENS)
+    return result
 
 
 def _format_tool_call(name: str, args: dict) -> str:
@@ -176,6 +202,7 @@ def agent_loop(
                 print(f"  {_format_tool_call(tool_name, tool_args)}", file=sys.stderr)
 
             result = execute_tool(tool_name, tool_args)
+            result = _pre_compact_result(result)
             reminder = TOOL_REMINDERS.get(tool_name, "")
 
             if LLM_BACKEND == "ollama":

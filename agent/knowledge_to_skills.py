@@ -424,6 +424,13 @@ def _process_file(
     }
     _save_coverage(doc_name, coverage)
 
+    # プロジェクト概要.md を自動生成
+    overview_path = _generate_project_summary(doc_name, sections, filepath, coverage)
+    if overview_path:
+        # saved_files の先頭に概要ファイルを追加
+        saved_files.insert(0, (overview_path, f"{doc_name} — 概要", "ドキュメント構成と統計の概要"))
+        print(f"  -> 概要ファイルを生成しました: {overview_path}", file=sys.stderr)
+
     # index.md を更新
     _update_index(doc_name, saved_files, filepath, sections, coverage=coverage)
     print(f"  -> {SKILLS_INDEX} を更新しました")
@@ -812,6 +819,74 @@ def _llm_structure(sections: list[dict], doc_name: str) -> list[dict]:
             structured.append(section)
 
     return structured
+
+
+# ── プロジェクト概要生成 ──────────────────────────────────────────
+
+
+def _generate_project_summary(
+    doc_name: str,
+    sections: list[dict],
+    source_path: str,
+    coverage: dict | None = None,
+) -> str | None:
+    """
+    セクション情報からプロジェクト概要.mdを生成して保存する。
+
+    Returns
+    -------
+    保存先のファイルパス。エラー時はNone。
+    """
+    from config import PROJECT_SUMMARY_FILENAME
+
+    lines = [
+        f"# {doc_name} — 概要\n",
+        f"*ソース: {source_path}*\n",
+    ]
+
+    # ドキュメント統計
+    total_chars = sum(len(s.get("content", "")) for s in sections)
+    lines.append("## 統計\n")
+    lines.append(f"- セクション数: {len(sections)}")
+    lines.append(f"- 合計文字数: {total_chars:,}")
+    if coverage:
+        total_pages = coverage.get("total_pages", 0)
+        if total_pages:
+            lines.append(f"- 総ページ数: {total_pages}")
+            if coverage.get("partial"):
+                pp = coverage.get("processed_pages", [])
+                if pp:
+                    lines.append(f"- 処理済みページ: {pp[0][0]}-{pp[0][1]}")
+
+    # セクション構成（目次として機能）
+    lines.append("\n## 構成\n")
+    for i, section in enumerate(sections):
+        title = section.get("title", f"セクション{i + 1}")
+        char_count = len(section.get("content", ""))
+        summary = section.get("summary", "")
+        summary_text = f" — {summary}" if summary else ""
+        lines.append(f"{i + 1}. **{title}** ({char_count:,}字){summary_text}")
+
+    # TOCがあれば追加
+    if coverage and coverage.get("toc"):
+        lines.append("\n## 原文目次\n")
+        for level, title, page in coverage["toc"][:50]:
+            indent = "  " * (level - 1)
+            lines.append(f"{indent}- {title} (p.{page})")
+
+    content = "\n".join(lines) + "\n"
+
+    # ファイル保存
+    skill_dir = os.path.join(SKILLS_DIR, doc_name)
+    os.makedirs(skill_dir, exist_ok=True)
+    overview_path = os.path.join(skill_dir, PROJECT_SUMMARY_FILENAME)
+    try:
+        with open(overview_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return overview_path
+    except OSError as e:
+        print(f"  [warning] 概要ファイル生成エラー: {e}", file=sys.stderr)
+        return None
 
 
 # ── ユーティリティ ────────────────────────────────────────────────
