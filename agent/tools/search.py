@@ -10,7 +10,7 @@ import json
 import os
 import re
 
-from config import SKILLS_DIR, SKILLS_INDEX
+from config import SEARCH_PAGE_SIZE, SKILLS_DIR, SKILLS_INDEX
 
 
 # ── list_skills ───────────────────────────────────────────────────
@@ -133,6 +133,7 @@ def keyword_search(
     pattern: str,
     scope: str | None = None,
     context_lines: int = 3,
+    page: int = 1,
 ) -> str:
     """
     全スキルファイルをgrep検索する。正規表現対応、前後N行の文脈付き。
@@ -172,8 +173,22 @@ def keyword_search(
         hint = _get_partial_docs_hint()
         return f"「{pattern}」はスキルファイル内に見つかりませんでした。{hint}"
 
-    header = f"## keyword_search: `{pattern}`\n\n{len(results)}ファイルでマッチ\n"
-    return header + "\n".join(results)
+    # ページネーション
+    total = len(results)
+    page_size = SEARCH_PAGE_SIZE
+    start = (page - 1) * page_size
+    paged = results[start:start + page_size]
+
+    header = f"## keyword_search: `{pattern}`\n\n"
+    if total > page_size:
+        end_idx = min(start + page_size, total)
+        header += f"{total}ファイル中 {start + 1}-{end_idx}件 (page {page})\n"
+        if start + page_size < total:
+            header += f"次ページ: keyword_search(pattern=\"{pattern}\", page={page + 1})\n"
+    else:
+        header += f"{total}ファイルでマッチ\n"
+
+    return header + "\n".join(paged)
 
 
 def _grep_file(path: str, regex: re.Pattern, context_lines: int) -> list[str]:

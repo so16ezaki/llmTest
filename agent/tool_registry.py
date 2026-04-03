@@ -8,7 +8,7 @@ execute_tool(name, args) でディスパッチする。
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import Any, Callable
 
 
 # ── ツールスキーマ定義（OpenAI function calling形式）──────────────
@@ -86,6 +86,11 @@ TOOL_DEFINITIONS: list[dict] = [
                         "type": "integer",
                         "description": "前後に含める行数（デフォルト: 3）",
                         "default": 3,
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "結果ページ番号（1始まり、デフォルト: 1）",
+                        "default": 1,
                     },
                 },
                 "required": ["pattern"],
@@ -168,14 +173,20 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "scan_project",
-            "description": "ディレクトリのファイル構成を返す。",
+            "description": "ディレクトリのファイル構成を返す。sort_by='mtime'で更新日時順に表示。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "スキャン対象のディレクトリパス",
-                    }
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "ソート方法: 'name'（ツリー形式）または 'mtime'（更新日時順）",
+                        "enum": ["name", "mtime"],
+                        "default": "name",
+                    },
                 },
                 "required": ["path"],
             },
@@ -206,7 +217,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "grep_source",
-            "description": "ソースコードをgrep検索する。",
+            "description": "ソースコードをgrep検索する。結果が多い場合はpage引数でページ送り可能。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -222,6 +233,11 @@ TOOL_DEFINITIONS: list[dict] = [
                         "type": "integer",
                         "description": "前後に含める行数（デフォルト: 3）",
                         "default": 3,
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "結果ページ番号（1始まり、デフォルト: 1）",
+                        "default": 1,
                     },
                 },
                 "required": ["pattern", "path"],
@@ -275,6 +291,47 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                 },
                 "required": ["path", "analysis"],
+            },
+        },
+    },
+    # ── スケルトン・依存関係 ────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_skeleton",
+            "description": "ファイルからシグネチャ+Docstring+インターフェースのみを抽出したスケルトンを返す。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "対象のソースファイルパス",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dependency_map",
+            "description": "ファイル/モジュール間の依存関係をMermaid図またはJSONで返す。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "解析対象のファイルまたはディレクトリ",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "出力形式: 'mermaid'（デフォルト）または 'json'",
+                        "enum": ["mermaid", "json"],
+                        "default": "mermaid",
+                    },
+                },
+                "required": ["path"],
             },
         },
     },
@@ -372,6 +429,57 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "完全一致の文字列置換でファイルを編集する。old_stringは一意である必要がある。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "編集対象のファイルパス",
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "置換前の文字列（完全一致、一意である必要がある）",
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "置換後の文字列",
+                    },
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    # ── サブエージェント ──────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "sub_agent",
+            "description": "サブエージェントにタスクを委任する。"
+                "explorer: ファイル探索・コード調査、"
+                "planner: 計画策定・TODO作成、"
+                "executor: ファイル書き込み・編集実行",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "role": {
+                        "type": "string",
+                        "enum": ["explorer", "planner", "executor"],
+                        "description": "サブエージェントの役割",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "サブエージェントへの指示（調査内容・計画要件・実行内容）",
+                    },
+                },
+                "required": ["role", "task"],
+            },
+        },
+    },
     # ── コンテキスト管理 ──────────────────────────────────────────
     {
         "type": "function",
@@ -446,13 +554,31 @@ TOOL_DEFINITIONS_TEXT: str = _build_tool_definitions_text()
 # ファイルパスを使うツールと、チェック対象の引数名・操作種別のマッピング
 # (引数名, 操作種別)
 _PATH_CHECKED_TOOLS: dict[str, tuple[str, str]] = {
-    "scan_project":      ("path", "読み取り"),
-    "read_source":       ("path", "読み取り"),
-    "grep_source":       ("path", "読み取り"),
-    "extract_structure": ("path", "読み取り"),
-    "static_analysis":   ("path", "読み取り"),
-    "write_file":        ("path", "書き込み"),
+    "scan_project":       ("path", "読み取り"),
+    "read_source":        ("path", "読み取り"),
+    "grep_source":        ("path", "読み取り"),
+    "extract_structure":  ("path", "読み取り"),
+    "static_analysis":    ("path", "読み取り"),
+    "generate_skeleton":  ("path", "読み取り"),
+    "dependency_map":     ("path", "読み取り"),
+    "write_file":         ("path", "書き込み"),
+    "edit_file":          ("path", "書き込み"),
 }
+
+
+# ── 書き込み承認コールバック ──────────────────────────────────────
+
+_approval_callback: Callable[[str, str, dict], bool] | None = None
+
+
+def set_approval_callback(cb: Callable[[str, str, dict], bool]) -> None:
+    """
+    GUIから承認コールバックを登録する。
+
+    コールバック引数: (tool_name, operation, args) → bool（Trueで許可）
+    """
+    global _approval_callback
+    _approval_callback = cb
 
 
 def execute_tool(name: str, args: dict[str, Any]) -> str:
@@ -461,8 +587,10 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
     tool_registryはここに全ツールの実装マッピングを持つ。
 
     ファイルパスを扱うツールはsandboxで許可チェックを行う。
+    書き込み承認が有効な場合、WRITE以上の操作はコールバックで承認を求める。
     """
     import sandbox
+    from config import REQUIRE_WRITE_APPROVAL
 
     # サンドボックスチェック（パスを使うツールのみ）
     if name in _PATH_CHECKED_TOOLS:
@@ -473,6 +601,13 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
                 sandbox.check(path, operation)
             except sandbox.SandboxViolation as e:
                 return str(e)
+
+    # 書き込み承認チェック
+    if REQUIRE_WRITE_APPROVAL and _approval_callback:
+        perm = sandbox.get_tool_permission(name)
+        if perm >= sandbox.PermissionLevel.WRITE:
+            if not _approval_callback(name, "書き込み", args):
+                return f"[blocked] {name} の実行がユーザーにより拒否されました。"
 
     # モジュールのレイジーインポートで循環参照を回避
     dispatch: dict[str, tuple[str, str]] = {
@@ -489,10 +624,14 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
         "grep_source":      ("tools.code",            "grep_source"),
         "extract_structure":("tools.code",            "extract_structure"),
         "static_analysis":  ("tools.static_analysis", "static_analysis"),
+        "generate_skeleton":("tools.code",            "generate_skeleton"),
+        "dependency_map":   ("tools.code",            "dependency_map"),
         "todo_write":       ("tools.planning",        "todo_write"),
         "memory_write":     ("tools.planning",        "memory_write"),
         "memory_read":      ("tools.planning",        "memory_read"),
         "write_file":       ("tools.output",          "write_file"),
+        "edit_file":        ("tools.edit",            "edit_file"),
+        "sub_agent":        ("sub_agent",             "run_sub_agent"),
         "compact_now":      ("tools.context",         "compact_now"),
         "get_status":       ("tools.context",         "get_status"),
     }

@@ -12,6 +12,49 @@ GUIで選択されたフォルダ/ファイルをset_allowed_roots()で登録し
 from __future__ import annotations
 
 import os
+from enum import IntEnum
+
+
+# ── 権限レベル ─────────────────────────────────────────────
+
+class PermissionLevel(IntEnum):
+    """操作種別ごとの権限レベル。"""
+    READ = 1       # ファイル読み取り（常に許可）
+    WRITE = 2      # ファイル書き込み（許可ルート内のみ）
+    EXECUTE = 3    # 外部コマンド実行（ユーザー承認必要）
+
+
+# 各ツールの権限レベルマッピング
+TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
+    "scan_project": PermissionLevel.READ,
+    "read_source": PermissionLevel.READ,
+    "grep_source": PermissionLevel.READ,
+    "list_skills": PermissionLevel.READ,
+    "skill_search": PermissionLevel.READ,
+    "read_skill": PermissionLevel.READ,
+    "keyword_search": PermissionLevel.READ,
+    "extract_structure": PermissionLevel.READ,
+    "static_analysis": PermissionLevel.READ,
+    "generate_skeleton": PermissionLevel.READ,
+    "dependency_map": PermissionLevel.READ,
+    "get_knowledge_coverage": PermissionLevel.READ,
+    "read_pdf_pages": PermissionLevel.READ,
+    "get_status": PermissionLevel.READ,
+    "memory_read": PermissionLevel.READ,
+    "compact_now": PermissionLevel.READ,
+    "sub_agent": PermissionLevel.READ,
+    "write_file": PermissionLevel.WRITE,
+    "edit_file": PermissionLevel.WRITE,
+    "todo_write": PermissionLevel.WRITE,
+    "memory_write": PermissionLevel.WRITE,
+    "convert_pages_to_skill": PermissionLevel.WRITE,
+}
+
+
+def get_tool_permission(tool_name: str) -> PermissionLevel:
+    """ツールの権限レベルを返す。未登録ツールはREADを返す。"""
+    return TOOL_PERMISSIONS.get(tool_name, PermissionLevel.READ)
+
 
 # エージェント自身のディレクトリ（sandbox.py の場所）
 _AGENT_DIR = os.path.dirname(os.path.abspath(__file__))

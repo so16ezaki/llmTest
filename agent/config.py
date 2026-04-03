@@ -92,5 +92,22 @@ PDF_RAW_READ_MAX_PAGES: int = int(os.getenv("PDF_RAW_READ_MAX_PAGES", "50"))
 SKILLS_CACHE_FILE: str = os.getenv("SKILLS_CACHE_FILE", ".skills_cache.json")
 ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "1") == "1"
 
+# ── ツール結果プレコンパクション ──────────────────────────
+# 1ツール結果あたりのトークン上限（超過時は先頭+末尾に切り詰め）
+TOOL_RESULT_MAX_TOKENS: int = int(os.getenv("TOOL_RESULT_MAX_TOKENS", "8000"))
+
+# ── 検索ページネーション ─────────────────────────────────
+SEARCH_PAGE_SIZE: int = int(os.getenv("SEARCH_PAGE_SIZE", "20"))
+
+# ── サブエージェント ─────────────────────────────────────
+SUB_AGENT_MAX_TURNS: int = int(os.getenv("SUB_AGENT_MAX_TURNS", "10"))
+
+# ── プロジェクト概要 ─────────────────────────────────────
+PROJECT_SUMMARY_FILENAME: str = "_overview.md"
+PROJECT_SUMMARY_KEY: str = "project_summary"
+
+# ── 書き込み承認 ─────────────────────────────────────────
+REQUIRE_WRITE_APPROVAL: bool = os.getenv("REQUIRE_WRITE_APPROVAL", "0") == "1"
+
 # ── コスト管理（オプション・未実装） ──────────────────────
 # BUDGET_USD: float = float(os.getenv("BUDGET_USD", "0"))  # 0 = 無制限

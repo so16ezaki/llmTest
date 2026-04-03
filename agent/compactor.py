@@ -108,7 +108,7 @@ def _compress_text(text: str) -> str:
     return text.strip()
 
 
-def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+def truncate_to_tokens(text: str, max_tokens: int) -> str:
     """テキストを先頭+末尾に切り詰めてmax_tokens以内に収める。"""
     tokens = _ENCODER.encode(text)
     if len(tokens) <= max_tokens:
@@ -128,7 +128,7 @@ def tier2_compact(messages: list[dict]) -> list[dict]:
         if msg.get("role") == "tool" and msg.get("content") != "[cleared]":
             content = msg.get("content", "")
             content = _compress_text(content)
-            content = _truncate_to_tokens(content, TIER2_MAX_RESULT_TOKENS)
+            content = truncate_to_tokens(content, TIER2_MAX_RESULT_TOKENS)
             result.append({**msg, "content": content})
         else:
             result.append(msg)
@@ -184,7 +184,7 @@ def tier3_compact(messages: list[dict], system_prompt: str) -> list[dict]:
     # ツール結果もトークン上限内に収める
     compressed_tools = []
     for msg in recent_tools:
-        content = _truncate_to_tokens(
+        content = truncate_to_tokens(
             msg.get("content", ""), TIER3_MAX_RESULT_TOKENS // len(recent_tools)
         )
         compressed_tools.append({**msg, "content": content})
