@@ -545,6 +545,17 @@ class KnowledgeManagerTab(ttk.Frame):
             bg="bg", fg="muted")
         status_lbl.pack(fill="x", padx=20, pady=(4, 0))
 
+        # 進捗バー
+        prog_row = _fr(self)
+        prog_row.pack(fill="x", padx=20, pady=(4, 0))
+        self._ing_prog = ttk.Progressbar(
+            prog_row, mode="determinate", maximum=4, value=0)
+        self._ing_prog.pack(fill="x", side="left", expand=True)
+        self._ing_pct = tk.StringVar(value="")
+        _tag(tk.Label(prog_row, textvariable=self._ing_pct,
+                      bg=C["bg"], fg=C["muted"], font=FONT_SM, width=8),
+             bg="bg", fg="muted").pack(side="right", padx=(6, 0))
+
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=20, pady=12)
 
         # ━━ 一覧ツールバー ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -574,7 +585,7 @@ class KnowledgeManagerTab(ttk.Frame):
         self._tree.heading("#0",       text="ナレッジ名",   anchor="w")
         self._tree.heading("files",    text="ファイル数",   anchor="center")
         self._tree.heading("size",     text="サイズ",       anchor="e")
-        self._tree.heading("coverage", text="カバレッジ",   anchor="center")
+        self._tree.heading("coverage", text="ナレッジ化率", anchor="center")
         self._tree.heading("source",   text="取り込み元",   anchor="w")
         self._tree.column("#0",       width=200, minwidth=120, stretch=True)
         self._tree.column("files",    width=80,  minwidth=60,  stretch=False, anchor="center")
@@ -629,6 +640,8 @@ class KnowledgeManagerTab(ttk.Frame):
         self._ingest_running = True
         self._ing_run_btn.enable(False)
         self._ing_status.set(f"処理中: {self._ing_path}")
+        self._ing_prog["value"] = 0
+        self._ing_pct.set("0%")
         threading.Thread(target=self._ingest_work, daemon=True).start()
 
     def _ingest_work(self):
@@ -636,6 +649,12 @@ class KnowledgeManagerTab(ttk.Frame):
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = _Writer(self._ingest_q)
         sys.stderr = _Writer(self._ingest_q, "err")
+
+        # 進捗コールバックを設定
+        def _on_progress(phase, current, total, message):
+            self._ingest_q.put(("__progress__", f"{phase}|{current}|{total}|{message}"))
+        k2s.set_progress_callback(_on_progress)
+
         try:
             p    = self._ing_path
             name = self._ing_name.get().strip() or None
@@ -650,6 +669,7 @@ class KnowledgeManagerTab(ttk.Frame):
             self._ingest_q.put(("err", f"エラー: {e}"))
         finally:
             sys.stdout, sys.stderr = old_out, old_err
+            k2s.set_progress_callback(None)
             self._ingest_q.put(("__done__", ""))
 
     def _ingest_poll(self):
@@ -659,13 +679,35 @@ class KnowledgeManagerTab(ttk.Frame):
                 if tag == "__done__":
                     self._ingest_running = False
                     self._ing_run_btn.enable(True)
+                    self._ing_prog["value"] = 0
+                    self._ing_pct.set("")
                     self.refresh()
+                elif tag == "__progress__":
+                    # 構造化進捗: "phase|current|total|message"
+                    parts = text.split("|", 3)
+                    if len(parts) == 4:
+                        phase, cur, tot, msg = parts
+                        try:
+                            cur_i, tot_i = int(cur), int(tot)
+                            self._ing_prog["maximum"] = tot_i
+                            self._ing_prog["value"] = cur_i
+                            pct = cur_i * 100 // tot_i if tot_i else 0
+                            self._ing_pct.set(f"{pct}%")
+                        except ValueError:
+                            pass
+                        if msg:
+                            self._ing_status.set(msg.strip()[:100])
                 elif tag == "err":
-                    self._ing_status.set(text.strip())
+                    # stderrメッセージ — \r付き進捗行はステータスに表示
+                    line = text.strip()
+                    if line:
+                        # \rで始まる行や "PDF変換:" を含む行は進捗表示
+                        clean = text.replace("\r", "").strip()
+                        if clean:
+                            self._ing_status.set(clean[:100])
                 elif tag == "ok":
                     self._ing_status.set(text.strip())
                 else:
-                    # 処理中ファイル名を1行で表示
                     line = text.strip()
                     if line:
                         self._ing_status.set(line[:100])

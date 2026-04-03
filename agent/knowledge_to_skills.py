@@ -31,6 +31,8 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from typing import Callable
+
 from config import (
     ENABLE_CACHE,
     KNOWLEDGE_MAX_TOKENS,
@@ -41,6 +43,27 @@ from config import (
     SKILLS_DIR,
     SKILLS_INDEX,
 )
+
+# ── 進捗コールバック ──────────────────────────────────────────────
+# GUI等から設定可能。(phase, current, total, message) を受け取る。
+# phase: "read" | "split" | "llm" | "write" | "done"
+
+_progress_callback: Callable[[str, int, int, str], None] | None = None
+
+
+def set_progress_callback(callback: Callable[[str, int, int, str], None] | None) -> None:
+    """進捗コールバックを設定する。GUIから呼び出す。"""
+    global _progress_callback
+    _progress_callback = callback
+
+
+def _report_progress(phase: str, current: int, total: int, message: str = "") -> None:
+    """進捗を報告する。コールバックが設定されていればコールバック、なければstderr。"""
+    if _progress_callback:
+        _progress_callback(phase, current, total, message)
+    else:
+        if message:
+            print(f"  {message}", file=sys.stderr)
 
 
 def main() -> None:
@@ -345,16 +368,16 @@ def _process_file(
         sections = checkpoint["sections"]
     else:
         # Markdown変換
-        print("  [1/4] ファイル読み込み・変換...", file=sys.stderr)
+        _report_progress("read", 0, 4, "[1/4] ファイル読み込み・変換...")
         from readers import read_file
         try:
             markdown_content = read_file(filepath)
         except Exception as e:
-            print(f"  [error] 読み込み失敗: {e}", file=sys.stderr)
+            _report_progress("read", 0, 4, f"[error] 読み込み失敗: {e}")
             return
 
         # 章分割
-        print("  [2/4] セクション分割...", file=sys.stderr)
+        _report_progress("split", 1, 4, "[2/4] セクション分割...")
         if is_pdf:
             sections = split_sections_pdf(filepath, markdown_content)
         else:
@@ -365,10 +388,10 @@ def _process_file(
 
         # LLM構造化（オプション）
         if use_llm:
-            print("  [3/4] LLM構造化...", file=sys.stderr)
+            _report_progress("llm", 2, 4, "[3/4] LLM構造化...")
             sections = _llm_structure(sections, doc_name)
         else:
-            print("  [3/4] LLM構造化...スキップ", file=sys.stderr)
+            _report_progress("llm", 2, 4, "[3/4] LLM構造化...スキップ")
 
         # チェックポイント保存
         _save_checkpoint(doc_name, {
@@ -383,14 +406,14 @@ def _process_file(
     sections, remaining = _apply_token_limit(sections, KNOWLEDGE_MAX_TOKENS)
     is_partial = bool(remaining)
     if is_partial:
-        print(
-            f"  トークン上限到達: {len(sections)}/{len(all_sections)}セクションを処理"
+        _report_progress(
+            "split", 2, 4,
+            f"トークン上限到達: {len(sections)}/{len(all_sections)}セクションを処理"
             f"（残り{len(remaining)}セクション）",
-            file=sys.stderr,
         )
 
     # 保存
-    print(f"  [4/4] {len(sections)}セクションを書き出し...", file=sys.stderr)
+    _report_progress("write", 3, 4, f"[4/4] {len(sections)}セクションを書き出し...")
     skill_dir = os.path.join(SKILLS_DIR, doc_name)
     os.makedirs(skill_dir, exist_ok=True)
 
@@ -436,7 +459,7 @@ def _process_file(
 
     elapsed = time.time() - start_time
     partial_note = "（部分処理）" if is_partial else ""
-    print(f"  完了{partial_note}（{len(sections)}セクション, {elapsed:.1f}秒）")
+    _report_progress("done", 4, 4, f"完了{partial_note}（{len(sections)}セクション, {elapsed:.1f}秒）")
 
 
 def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple[str, str, str]]:
