@@ -34,6 +34,13 @@ TOOL_REMINDERS: dict[str, str] = {
         "\n[reminder] 解析結果を解釈し、問題があればread_sourceで該当箇所を確認してください。",
     "list_skills":
         "\n[reminder] 関連するスキルはskill_searchで絞り込み、read_skillで詳細を読んでください。",
+    "read_pdf_pages":
+        "\n[reminder] 重要な内容を見つけた場合はconvert_pages_to_skillで"
+        "スキルファイルに変換すると、今後の検索で見つかりやすくなります。",
+    "get_knowledge_coverage":
+        "\n[reminder] 未処理ページの内容を確認するにはread_pdf_pagesを使ってください。",
+    "convert_pages_to_skill":
+        "\n[reminder] 変換が完了しました。keyword_searchやskill_searchで検索可能になりました。",
 }
 
 
@@ -66,6 +73,12 @@ def _format_tool_call(name: str, args: dict) -> str:
         return f"[todo_write] {count} items"
     if name == "memory_write":
         return f"[memory_write] key={args.get('key', '')}"
+    if name == "read_pdf_pages":
+        return f"[read_pdf] {args.get('doc_name', '')} p.{args.get('start_page', '')}-{args.get('end_page', '')}"
+    if name == "get_knowledge_coverage":
+        return f"[coverage] {args.get('doc_name', 'all')}"
+    if name == "convert_pages_to_skill":
+        return f"[convert] {args.get('doc_name', '')} p.{args.get('start_page', '')}-{args.get('end_page', '')}"
     # デフォルト: ツール名と引数を短縮表示
     args_str = json.dumps(args, ensure_ascii=False)[:60]
     return f"[tool] {name}({args_str})"

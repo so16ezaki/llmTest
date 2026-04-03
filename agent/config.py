@@ -67,5 +67,30 @@ SECTION_MIN_CHARS: int = 500
 # 章分割の最大文字数（これ超過は分割）
 SECTION_MAX_CHARS: int = 30000
 
+# ── PDF並列処理 ──────────────────────────────────────────
+# この値以上のページ数で並列処理を有効化
+PDF_PARALLEL_THRESHOLD: int = int(os.getenv("PDF_PARALLEL_THRESHOLD", "100"))
+
+# 並列処理時のチャンクサイズ（ページ数）
+PDF_CHUNK_PAGES: int = int(os.getenv("PDF_CHUNK_PAGES", "50"))
+
+# 並列ワーカー数
+PDF_WORKERS: int = int(os.getenv("PDF_WORKERS", "4"))
+
+# ページベース分割時のセクションあたりページ数（TOC/フォントサイズ検出失敗時のフォールバック）
+PAGES_PER_SECTION_FALLBACK: int = int(os.getenv("PAGES_PER_SECTION_FALLBACK", "10"))
+
+# ── ナレッジ処理上限 ─────────────────────────────────────
+# 1回の取り込みで処理するスキルの累計トークン数上限（0 = 無制限）
+# 上限到達時はセクション境界で停止し、残りは未処理として記録する
+KNOWLEDGE_MAX_TOKENS: int = int(os.getenv("KNOWLEDGE_MAX_TOKENS", "0"))
+
+# エージェント実行時のPDF直接読み取り最大ページ数（1回のツール呼び出しあたり）
+PDF_RAW_READ_MAX_PAGES: int = int(os.getenv("PDF_RAW_READ_MAX_PAGES", "50"))
+
+# ── キャッシュ ────────────────────────────────────────────
+SKILLS_CACHE_FILE: str = os.getenv("SKILLS_CACHE_FILE", ".skills_cache.json")
+ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "1") == "1"
+
 # ── コスト管理（オプション・未実装） ──────────────────────
 # BUDGET_USD: float = float(os.getenv("BUDGET_USD", "0"))  # 0 = 無制限
