@@ -12,6 +12,23 @@ from typing import Any
 import requests
 
 from config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from tool_parser import sanitize_content
+
+
+_known_names: set[str] | None = None
+
+
+def _get_known_tool_names() -> set[str]:
+    """TOOL_DEFINITIONSから既知ツール名のセットを遅延構築する。"""
+    global _known_names
+    if _known_names is None:
+        from tool_registry import TOOL_DEFINITIONS
+        _known_names = {
+            t["function"]["name"]
+            for t in TOOL_DEFINITIONS
+            if "function" in t
+        }
+    return _known_names
 
 
 def chat(
@@ -120,4 +137,13 @@ def _parse_response(data: dict) -> "LLMResponse":
             "args": args,
         })
 
-    return LLMResponse(content=content, tool_calls=tool_calls)
+    # contentのサニタイズ（JSON漏れ・<think>タグ除去）
+    cleaned, fallback_calls = sanitize_content(
+        content,
+        has_tool_calls=bool(tool_calls),
+        known_tool_names=_get_known_tool_names(),
+    )
+    if not tool_calls and fallback_calls:
+        tool_calls = fallback_calls
+
+    return LLMResponse(content=cleaned, tool_calls=tool_calls)
