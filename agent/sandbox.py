@@ -5,7 +5,7 @@ sandbox.py — エージェントのファイルアクセス制限
 GUIで選択されたフォルダ/ファイルをset_allowed_roots()で登録してから使う。
 
 常に許可される内部パス:
-  - skills/ ディレクトリ（エージェントのナレッジベース）
+  - knowledge/ ディレクトリ（エージェントのナレッジベース）
   - project_memory.md（永続メモリ）
 """
 
@@ -29,9 +29,9 @@ TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "scan_project": PermissionLevel.READ,
     "read_source": PermissionLevel.READ,
     "grep_source": PermissionLevel.READ,
-    "list_skills": PermissionLevel.READ,
-    "skill_search": PermissionLevel.READ,
-    "read_skill": PermissionLevel.READ,
+    "list_knowledge": PermissionLevel.READ,
+    "knowledge_search": PermissionLevel.READ,
+    "read_knowledge": PermissionLevel.READ,
     "keyword_search": PermissionLevel.READ,
     "extract_structure": PermissionLevel.READ,
     "static_analysis": PermissionLevel.READ,
@@ -47,7 +47,7 @@ TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "edit_file": PermissionLevel.WRITE,
     "todo_write": PermissionLevel.WRITE,
     "memory_write": PermissionLevel.WRITE,
-    "convert_pages_to_skill": PermissionLevel.WRITE,
+    "convert_pages_to_knowledge": PermissionLevel.WRITE,
 }
 
 
@@ -61,7 +61,7 @@ _AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 常に許可する内部パス（絶対パスに解決済み）
 _INTERNAL_ROOTS: tuple[str, ...] = (
-    os.path.realpath(os.path.join(_AGENT_DIR, "skills")),
+    os.path.realpath(os.path.join(_AGENT_DIR, "knowledge")),
     os.path.realpath(os.path.join(_AGENT_DIR, "project_memory.md")),
 )
 

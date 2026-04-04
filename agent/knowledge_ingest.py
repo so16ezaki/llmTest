@@ -1,8 +1,8 @@
 """
-knowledge_to_skills.py — ナレッジ取り込みCLI
+knowledge_ingest.py — ナレッジ取り込みCLI
 
-任意形式のドキュメントをスキルファイル（Markdown）に変換し、
-skills/{doc_name}/ に保存する。
+任意形式のドキュメントをナレッジファイル（Markdown）に変換し、
+knowledge/{doc_name}/ に保存する。
 
 大規模PDF対応:
   - PDF構造情報（TOC、フォントサイズ）を活用した高品質セクション分割
@@ -12,10 +12,10 @@ skills/{doc_name}/ に保存する。
   - 進捗表示
 
 使用法:
-    python knowledge_to_skills.py <input_path> [--llm] [--name <doc_name>] [--no-cache] [--force]
+    python knowledge_ingest.py <input_path> [--llm] [--name <doc_name>] [--no-cache] [--force]
 
     --llm      : OllamaのLLMで構造化（各セクションに要約を付与）
-    --name     : スキル名を手動指定（省略時はファイル名から自動生成）
+    --name     : ナレッジ名を手動指定（省略時はファイル名から自動生成）
     --no-cache : キャッシュを無視して再処理
     --force    : チェックポイントを無視して最初から処理
 """
@@ -37,17 +37,17 @@ from config import (
     PAGES_PER_SECTION_FALLBACK,
     SECTION_MAX_CHARS,
     SECTION_MIN_CHARS,
-    SKILLS_CACHE_FILE,
-    SKILLS_DIR,
-    SKILLS_INDEX,
+    KNOWLEDGE_CACHE_FILE,
+    KNOWLEDGE_DIR,
+    KNOWLEDGE_INDEX,
 )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ドキュメントをスキルファイルに変換する")
+    parser = argparse.ArgumentParser(description="ドキュメントをナレッジファイルに変換する")
     parser.add_argument("input_path", help="入力ファイルまたはディレクトリ")
     parser.add_argument("--llm", action="store_true", help="LLMで構造化する")
-    parser.add_argument("--name", help="スキル名（省略時はファイル名から自動生成）")
+    parser.add_argument("--name", help="ナレッジ名（省略時はファイル名から自動生成）")
     parser.add_argument("--no-cache", action="store_true", help="キャッシュを無視して再処理")
     parser.add_argument("--force", action="store_true", help="チェックポイントを無視して最初から処理")
     args = parser.parse_args()
@@ -106,9 +106,9 @@ def _collect_files(directory: str) -> list[str]:
 
 def _load_cache() -> dict:
     """キャッシュファイルを読み込む。"""
-    if os.path.isfile(SKILLS_CACHE_FILE):
+    if os.path.isfile(KNOWLEDGE_CACHE_FILE):
         try:
-            with open(SKILLS_CACHE_FILE, encoding="utf-8") as f:
+            with open(KNOWLEDGE_CACHE_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -117,7 +117,7 @@ def _load_cache() -> dict:
 
 def _save_cache(cache: dict) -> None:
     """キャッシュファイルを保存する。"""
-    with open(SKILLS_CACHE_FILE, "w", encoding="utf-8") as f:
+    with open(KNOWLEDGE_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
@@ -159,7 +159,7 @@ def _update_cache_entry(filepath: str, doc_name: str, sections_count: int, cache
 
 
 def _checkpoint_path(doc_name: str) -> str:
-    return os.path.join(SKILLS_DIR, doc_name, ".checkpoint.json")
+    return os.path.join(KNOWLEDGE_DIR, doc_name, ".checkpoint.json")
 
 
 def _load_checkpoint(doc_name: str) -> dict | None:
@@ -227,7 +227,7 @@ def _apply_token_limit(
 
 
 def _coverage_path(doc_name: str) -> str:
-    return os.path.join(SKILLS_DIR, doc_name, ".coverage.json")
+    return os.path.join(KNOWLEDGE_DIR, doc_name, ".coverage.json")
 
 
 def load_coverage(doc_name: str) -> dict | None:
@@ -322,7 +322,7 @@ def _process_file(
     use_cache: bool = True,
     force: bool = False,
 ) -> None:
-    """1ファイルを処理してスキルファイルを生成する。"""
+    """1ファイルを処理してナレッジファイルを生成する。"""
     start_time = time.time()
 
     # ドキュメント名
@@ -391,10 +391,10 @@ def _process_file(
 
     # 保存
     print(f"  [4/4] {len(sections)}セクションを書き出し...", file=sys.stderr)
-    skill_dir = os.path.join(SKILLS_DIR, doc_name)
-    os.makedirs(skill_dir, exist_ok=True)
+    knowledge_dir = os.path.join(KNOWLEDGE_DIR, doc_name)
+    os.makedirs(knowledge_dir, exist_ok=True)
 
-    saved_files = _write_sections_parallel(sections, skill_dir)
+    saved_files = _write_sections_parallel(sections, knowledge_dir)
 
     # カバレッジ情報を構築・保存
     total_pages = 0
@@ -433,7 +433,7 @@ def _process_file(
 
     # index.md を更新
     _update_index(doc_name, saved_files, filepath, sections, coverage=coverage)
-    print(f"  -> {SKILLS_INDEX} を更新しました")
+    print(f"  -> {KNOWLEDGE_INDEX} を更新しました")
 
     # チェックポイント削除・キャッシュ更新
     _remove_checkpoint(doc_name)
@@ -446,7 +446,7 @@ def _process_file(
     print(f"  完了{partial_note}（{len(sections)}セクション, {elapsed:.1f}秒）")
 
 
-def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple[str, str, str]]:
+def _write_sections_parallel(sections: list[dict], knowledge_dir: str) -> list[tuple[str, str, str]]:
     """セクションファイルを並列で書き出す。Returns: [(path, title, summary), ...]"""
     def write_one(args):
         i, section = args
@@ -454,7 +454,7 @@ def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple
         if section.get("title"):
             safe_title = re.sub(r"[^\w\u3000-\u9fff]", "_", section["title"])[:40]
             filename = f"{i+1:02d}_{safe_title}.md"
-        fpath = os.path.join(skill_dir, filename)
+        fpath = os.path.join(knowledge_dir, filename)
         content = section.get("content", "")
         if section.get("title") and not content.startswith("#"):
             content = f"# {section['title']}\n\n{content}"
@@ -877,9 +877,9 @@ def _generate_project_summary(
     content = "\n".join(lines) + "\n"
 
     # ファイル保存
-    skill_dir = os.path.join(SKILLS_DIR, doc_name)
-    os.makedirs(skill_dir, exist_ok=True)
-    overview_path = os.path.join(skill_dir, PROJECT_SUMMARY_FILENAME)
+    knowledge_dir = os.path.join(KNOWLEDGE_DIR, doc_name)
+    os.makedirs(knowledge_dir, exist_ok=True)
+    overview_path = os.path.join(knowledge_dir, PROJECT_SUMMARY_FILENAME)
     try:
         with open(overview_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -907,14 +907,14 @@ def _update_index(
     coverage: dict | None = None,
 ) -> None:
     """
-    skills/index.md にスキルエントリを追記/更新する。
+    knowledge/index.md にナレッジエントリを追記/更新する。
 
     各セクションに概要・文字数情報を付与して品質を向上。
     部分処理の場合はカバレッジ情報と未処理TOCを表示。
     """
     existing = ""
-    if os.path.isfile(SKILLS_INDEX):
-        with open(SKILLS_INDEX, encoding="utf-8") as f:
+    if os.path.isfile(KNOWLEDGE_INDEX):
+        with open(KNOWLEDGE_INDEX, encoding="utf-8") as f:
             existing = f.read()
 
     # 既存のdoc_nameセクションを除去
@@ -941,7 +941,7 @@ def _update_index(
             )
 
     for i, (fpath, title, summary) in enumerate(saved_files):
-        rel = os.path.relpath(fpath, SKILLS_DIR)
+        rel = os.path.relpath(fpath, KNOWLEDGE_DIR)
         char_count = 0
         if sections and i < len(sections):
             char_count = len(sections[i].get("content", ""))
@@ -964,11 +964,11 @@ def _update_index(
 
     new_content = existing + "\n" + "\n".join(entries) + "\n"
 
-    if not new_content.startswith("# スキルインデックス"):
-        new_content = "# スキルインデックス\n\n" + new_content.lstrip()
+    if not new_content.startswith("# ナレッジインデックス"):
+        new_content = "# ナレッジインデックス\n\n" + new_content.lstrip()
 
-    os.makedirs(os.path.dirname(os.path.abspath(SKILLS_INDEX)), exist_ok=True)
-    with open(SKILLS_INDEX, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(os.path.abspath(KNOWLEDGE_INDEX)), exist_ok=True)
+    with open(KNOWLEDGE_INDEX, "w", encoding="utf-8") as f:
         f.write(new_content)
 
 

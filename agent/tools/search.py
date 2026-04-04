@@ -1,7 +1,7 @@
 """
 tools/search.py — ナレッジ検索ツール群
 
-list_skills, skill_search, read_skill, keyword_search を実装する。
+list_knowledge, knowledge_search, read_knowledge, keyword_search を実装する。
 """
 
 from __future__ import annotations
@@ -10,31 +10,31 @@ import json
 import os
 import re
 
-from config import SEARCH_PAGE_SIZE, SKILLS_DIR, SKILLS_INDEX
+from config import KNOWLEDGE_DIR, KNOWLEDGE_INDEX, SEARCH_PAGE_SIZE
 
 
-# ── list_skills ───────────────────────────────────────────────────
+# ── list_knowledge ────────────────────────────────────────────────
 
-def list_skills(scope: str | None = None) -> str:
+def list_knowledge(scope: str | None = None) -> str:
     """
-    利用可能なスキルファイルの一覧と概要を返す。
+    利用可能なナレッジファイルの一覧と概要を返す。
 
     Parameters
     ----------
     scope:
         サブディレクトリ名でフィルタ（省略時は全て）
     """
-    skills_root = SKILLS_DIR
+    knowledge_root = KNOWLEDGE_DIR
     if scope:
-        skills_root = os.path.join(SKILLS_DIR, scope)
+        knowledge_root = os.path.join(KNOWLEDGE_DIR, scope)
 
-    if not os.path.isdir(skills_root):
-        return f"[error] ディレクトリが見つかりません: {skills_root}"
+    if not os.path.isdir(knowledge_root):
+        return f"[error] ディレクトリが見つかりません: {knowledge_root}"
 
-    lines = [f"## スキルファイル一覧（{skills_root}）\n"]
-    for root, dirs, files in os.walk(skills_root):
+    lines = [f"## ナレッジファイル一覧（{knowledge_root}）\n"]
+    for root, dirs, files in os.walk(knowledge_root):
         dirs.sort()
-        rel_root = os.path.relpath(root, SKILLS_DIR)
+        rel_root = os.path.relpath(root, KNOWLEDGE_DIR)
         md_files = sorted(f for f in files if f.endswith(".md") and f != "index.md")
         if not md_files:
             continue
@@ -45,11 +45,11 @@ def list_skills(scope: str | None = None) -> str:
         for fname in md_files:
             fpath = os.path.join(root, fname)
             first_line = _get_first_line(fpath)
-            rel_path = os.path.relpath(fpath, SKILLS_DIR)
+            rel_path = os.path.relpath(fpath, KNOWLEDGE_DIR)
             lines.append(f"- `{rel_path}` — {first_line}")
 
     if len(lines) == 1:
-        return "スキルファイルが見つかりませんでした。"
+        return "ナレッジファイルが見つかりませんでした。"
     return "\n".join(lines)
 
 
@@ -66,17 +66,17 @@ def _get_first_line(path: str) -> str:
     return "（概要なし）"
 
 
-# ── skill_search ──────────────────────────────────────────────────
+# ── knowledge_search ──────────────────────────────────────────────
 
-def skill_search(query: str) -> str:
+def knowledge_search(query: str) -> str:
     """
-    index.mdの内容から、質問に関連するスキルを推薦する。
+    index.mdの内容から、質問に関連するナレッジを推薦する。
 
-    クエリの単語がタイトルや概要に含まれるスキルをスコアリングして返す。
+    クエリの単語がタイトルや概要に含まれるナレッジをスコアリングして返す。
     """
-    index_content = _read_file(SKILLS_INDEX)
+    index_content = _read_file(KNOWLEDGE_INDEX)
     if not index_content:
-        return "index.mdが見つかりません。list_skillsで一覧を確認してください。"
+        return "index.mdが見つかりません。list_knowledgeで一覧を確認してください。"
 
     query_words = re.findall(r"\w+", query.lower())
     if not query_words:
@@ -95,28 +95,28 @@ def skill_search(query: str) -> str:
 
     if not results:
         hint = _get_partial_docs_hint()
-        return f"「{query}」に関連するスキルが見つかりませんでした。keyword_searchで横断検索してみてください。{hint}"
+        return f"「{query}」に関連するナレッジが見つかりませんでした。keyword_searchで横断検索してみてください。{hint}"
 
-    lines = [f"## 「{query}」に関連するスキル（関連度順）\n"]
+    lines = [f"## 「{query}」に関連するナレッジ（関連度順）\n"]
     for score, line in results[:10]:
         lines.append(f"- [{score}点] {line}")
     return "\n".join(lines)
 
 
-# ── read_skill ────────────────────────────────────────────────────
+# ── read_knowledge ────────────────────────────────────────────────
 
-def read_skill(path: str) -> str:
+def read_knowledge(path: str) -> str:
     """
-    指定スキルファイルの全文を返す。
+    指定ナレッジファイルの全文を返す。
 
     Parameters
     ----------
     path:
-        skills/ 配下の相対パス（例: "example_api_docs/overview.md"）
+        knowledge/ 配下の相対パス（例: "example_api_docs/overview.md"）
     """
     # skills/配下の相対パスとして解釈
-    if not path.startswith(SKILLS_DIR):
-        full_path = os.path.join(SKILLS_DIR, path)
+    if not path.startswith(KNOWLEDGE_DIR):
+        full_path = os.path.join(KNOWLEDGE_DIR, path)
     else:
         full_path = path
 
@@ -136,18 +136,18 @@ def keyword_search(
     page: int = 1,
 ) -> str:
     """
-    全スキルファイルをgrep検索する。正規表現対応、前後N行の文脈付き。
+    全ナレッジファイルをgrep検索する。正規表現対応、前後N行の文脈付き。
 
     Parameters
     ----------
     pattern:
         検索パターン（正規表現）
     scope:
-        検索対象のサブディレクトリ（省略時はskills/全体）
+        検索対象のサブディレクトリ（省略時はknowledge/全体）
     context_lines:
         前後に含める行数
     """
-    search_root = os.path.join(SKILLS_DIR, scope) if scope else SKILLS_DIR
+    search_root = os.path.join(KNOWLEDGE_DIR, scope) if scope else KNOWLEDGE_DIR
 
     if not os.path.isdir(search_root):
         return f"[error] ディレクトリが見つかりません: {search_root}"
@@ -166,12 +166,12 @@ def keyword_search(
             fpath = os.path.join(root, fname)
             matches = _grep_file(fpath, regex, context_lines)
             if matches:
-                rel = os.path.relpath(fpath, SKILLS_DIR)
+                rel = os.path.relpath(fpath, KNOWLEDGE_DIR)
                 results.append(f"\n### {rel}\n" + "\n---\n".join(matches))
 
     if not results:
         hint = _get_partial_docs_hint()
-        return f"「{pattern}」はスキルファイル内に見つかりませんでした。{hint}"
+        return f"「{pattern}」はナレッジファイル内に見つかりませんでした。{hint}"
 
     # ページネーション
     total = len(results)
@@ -249,11 +249,11 @@ def _read_file(path: str) -> str | None:
 
 def _get_partial_docs_hint() -> str:
     """部分処理されたドキュメントがあればヒント文字列を返す。"""
-    if not os.path.isdir(SKILLS_DIR):
+    if not os.path.isdir(KNOWLEDGE_DIR):
         return ""
 
     hints = []
-    for entry in os.scandir(SKILLS_DIR):
+    for entry in os.scandir(KNOWLEDGE_DIR):
         if not entry.is_dir():
             continue
         coverage_path = os.path.join(entry.path, ".coverage.json")

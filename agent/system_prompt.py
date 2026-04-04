@@ -3,7 +3,7 @@ system_prompt.py — システムプロンプトの動的生成
 
 セッション開始時に以下を埋め込む:
   - エージェントの役割・ルール
-  - skills/index.md（スキル一覧）
+  - knowledge/index.md（ナレッジ一覧）
   - project_memory.md（永続メモリ、先頭25KB）
   - TODO状態
 """
@@ -17,13 +17,13 @@ from config import (
     MEMORY_FILE,
     MEMORY_LIMIT_BYTES,
     PROJECT_SUMMARY_KEY,
-    SKILLS_INDEX,
+    KNOWLEDGE_INDEX,
 )
 
 
 _BASE_PROMPT = """\
 あなたはローカルPythonエージェントです。
-大規模な技術ドキュメント（スキルファイル）をナレッジとして使い、
+大規模な技術ドキュメント（ナレッジファイル）をナレッジとして使い、
 ユーザーの質問・指示に対して自律的に検索・解析・ドキュメント生成を行います。
 
 ## 行動原則
@@ -35,14 +35,14 @@ _BASE_PROMPT = """\
 
 ## ツール使用ガイド
 
-- まず list_skills や skill_search で関連スキルを特定してください。
-- 詳細が必要なら read_skill でスキルファイルの全文を読んでください。
+- まず list_knowledge や knowledge_search で関連ナレッジを特定してください。
+- 詳細が必要なら read_knowledge でナレッジファイルの全文を読んでください。
 - キーワードで横断検索したい場合は keyword_search を使ってください。
 - コード解析は scan_project → read_source → extract_structure の順で進めてください。
 - 成果物は write_file で保存してください。
 - 部分処理されたドキュメントがある場合、get_knowledge_coverageで未処理範囲を確認できます。
 - 未処理部分の情報が必要なら read_pdf_pages で直接読み取れます（自動でmd変換されます）。
-- 重要な情報を見つけたら convert_pages_to_skill でスキルファイルに変換してください。
+- 重要な情報を見つけたら convert_pages_to_knowledge でナレッジファイルに変換してください。
 
 ## コンテキスト管理
 
@@ -90,7 +90,7 @@ _AUTO_SUMMARY_PROMPT = """\
 
 def build_system_prompt(todo_content: str = "") -> str:
     """
-    現在のスキルインデックス・メモリ・TODOを埋め込んだシステムプロンプトを生成する。
+    現在のナレッジインデックス・メモリ・TODOを埋め込んだシステムプロンプトを生成する。
     """
     parts = [_BASE_PROMPT]
 
@@ -101,11 +101,11 @@ def build_system_prompt(todo_content: str = "") -> str:
         parts.append(f"\n{TOOL_DEFINITIONS_TEXT}")
 
     # skills/index.md
-    index_content = _read_file_safe(SKILLS_INDEX)
+    index_content = _read_file_safe(KNOWLEDGE_INDEX)
     if index_content:
-        parts.append(f"\n## 利用可能なスキル\n\n{index_content}")
+        parts.append(f"\n## 利用可能なナレッジ\n\n{index_content}")
     else:
-        parts.append("\n## 利用可能なスキル\n\n（まだスキルが登録されていません）")
+        parts.append("\n## 利用可能なナレッジ\n\n（まだナレッジが登録されていません）")
 
     # project_memory.md
     memory_content = _read_file_safe(MEMORY_FILE, max_bytes=MEMORY_LIMIT_BYTES)

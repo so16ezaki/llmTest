@@ -1,12 +1,12 @@
 # Example API Overview
 
-<!-- このファイルはスキルファイルのサンプルです -->
-<!-- knowledge_to_skills.py で実際のドキュメントから生成されます -->
+<!-- このファイルはナレッジファイルのサンプルです -->
+<!-- knowledge_ingest.py で実際のドキュメントから生成されます -->
 
 ## 概要
 
-このスキルファイルはAPIドキュメントから生成されたナレッジの例です。
-実際の運用では、PDFやMarkdownのAPIドキュメントを `knowledge_to_skills.py` で
+このナレッジファイルはAPIドキュメントから生成された例です。
+実際の運用では、PDFやMarkdownのAPIドキュメントを `knowledge_ingest.py` で
 変換したファイルがここに配置されます。
 
 ## 認証

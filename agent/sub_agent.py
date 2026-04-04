@@ -34,7 +34,7 @@ AGENT_ROLES: dict[str, dict] = {
         "allowed_tools": {
             "scan_project", "read_source", "grep_source", "extract_structure",
             "generate_skeleton", "dependency_map",
-            "list_skills", "skill_search", "read_skill", "keyword_search",
+            "list_knowledge", "knowledge_search", "read_knowledge", "keyword_search",
             "get_knowledge_coverage", "read_pdf_pages", "static_analysis",
         },
         "max_turns": SUB_AGENT_MAX_TURNS,
@@ -60,7 +60,7 @@ AGENT_ROLES: dict[str, dict] = {
             "edit_file を使う際は、十分な文脈を含めて一意にマッチさせてください。"
         ),
         "allowed_tools": {
-            "write_file", "edit_file", "read_source", "convert_pages_to_skill",
+            "write_file", "edit_file", "read_source", "convert_pages_to_knowledge",
         },
         "max_turns": SUB_AGENT_MAX_TURNS,
     },

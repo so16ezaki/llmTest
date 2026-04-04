@@ -2,12 +2,12 @@
 tools/knowledge.py — ナレッジカバレッジ・PDF直接読み取りツール群
 
 部分処理されたドキュメントのカバレッジ確認、未処理ページの直接読み取り、
-読み取ったページの正式スキル化を行う。
+読み取ったページの正式ナレッジ化を行う。
 
 ツール:
   - get_knowledge_coverage: ドキュメントの処理カバレッジ情報を返す
   - read_pdf_pages: PDFの指定ページ範囲を直接読み取りMarkdownに変換
-  - convert_pages_to_skill: 指定ページ範囲をスキルファイルに変換
+  - convert_pages_to_knowledge: 指定ページ範囲をナレッジファイルに変換
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 import os
 import re
 
-from config import PDF_RAW_READ_MAX_PAGES, SKILLS_DIR, SKILLS_INDEX
+from config import KNOWLEDGE_DIR, KNOWLEDGE_INDEX, PDF_RAW_READ_MAX_PAGES
 
 
 # ── get_knowledge_coverage ────────────────────────────────────────
@@ -38,15 +38,15 @@ def get_knowledge_coverage(doc_name: str | None = None) -> str:
 
 def _coverage_summary() -> str:
     """全ドキュメントのカバレッジ概要を返す。"""
-    if not os.path.isdir(SKILLS_DIR):
-        return "スキルディレクトリが見つかりません。"
+    if not os.path.isdir(KNOWLEDGE_DIR):
+        return "ナレッジディレクトリが見つかりません。"
 
     lines = ["## ナレッジカバレッジ概要\n"]
     lines.append("| ドキュメント | 状態 | 処理済み | 全体 | カバレッジ |")
     lines.append("|---|---|---|---|---|")
 
     found = False
-    for entry in sorted(os.scandir(SKILLS_DIR), key=lambda e: e.name):
+    for entry in sorted(os.scandir(KNOWLEDGE_DIR), key=lambda e: e.name):
         if not entry.is_dir():
             continue
         cov = _load_coverage_file(entry.name)
@@ -88,7 +88,7 @@ def _coverage_detail(doc_name: str) -> str:
     cov = _load_coverage_file(doc_name)
     if cov is None:
         # カバレッジファイルがない場合
-        doc_dir = os.path.join(SKILLS_DIR, doc_name)
+        doc_dir = os.path.join(KNOWLEDGE_DIR, doc_name)
         if os.path.isdir(doc_dir):
             return f"「{doc_name}」はカバレッジ情報がありません（旧形式で完全処理済みの可能性）。"
         return f"[error] ドキュメント「{doc_name}」が見つかりません。"
@@ -140,7 +140,7 @@ def read_pdf_pages(
     Parameters
     ----------
     doc_name:
-        ドキュメント名（skills/配下のディレクトリ名）
+        ドキュメント名（knowledge/配下のディレクトリ名）
     start_page:
         開始ページ番号（1始まり）
     end_page:
@@ -207,16 +207,16 @@ def _convert_pdf_range(filepath: str, start_page: int, end_page: int) -> str:
         return "[error] PDFの読み込みにはPyMuPDFが必要です。pip install pymupdf"
 
 
-# ── convert_pages_to_skill ────────────────────────────────────────
+# ── convert_pages_to_knowledge ────────────────────────────────────
 
 
-def convert_pages_to_skill(
+def convert_pages_to_knowledge(
     doc_name: str,
     start_page: int,
     end_page: int,
 ) -> str:
     """
-    PDFの指定ページ範囲を正式なスキルファイルに変換する。
+    PDFの指定ページ範囲を正式なナレッジファイルに変換する。
 
     Parameters
     ----------
@@ -249,7 +249,7 @@ def convert_pages_to_skill(
     md = _convert_pdf_range(source_path, start_page, end_page)
 
     # セクション分割
-    from knowledge_to_skills import (
+    from knowledge_ingest import (
         merge_small_sections,
         split_large_sections,
         split_sections,
@@ -260,12 +260,12 @@ def convert_pages_to_skill(
     sections = merge_small_sections(sections, min_chars=SECTION_MIN_CHARS)
     sections = split_large_sections(sections, max_chars=SECTION_MAX_CHARS)
 
-    # スキルファイルに保存（既存ファイルと衝突しないファイル名）
-    skill_dir = os.path.join(SKILLS_DIR, doc_name)
-    os.makedirs(skill_dir, exist_ok=True)
+    # ナレッジファイルに保存（既存ファイルと衝突しないファイル名）
+    knowledge_dir = os.path.join(KNOWLEDGE_DIR, doc_name)
+    os.makedirs(knowledge_dir, exist_ok=True)
 
     # 既存ファイル数を取得して連番を決定
-    existing_files = [f for f in os.listdir(skill_dir) if f.endswith(".md")]
+    existing_files = [f for f in os.listdir(knowledge_dir) if f.endswith(".md")]
     next_num = len(existing_files) + 1
 
     saved_files = []
@@ -277,7 +277,7 @@ def convert_pages_to_skill(
             filename = f"{num:02d}_p{start_page}_{end_page}_{safe_title}.md"
         else:
             filename = f"{num:02d}_p{start_page}_{end_page}.md"
-        fpath = os.path.join(skill_dir, filename)
+        fpath = os.path.join(knowledge_dir, filename)
 
         content = section.get("content", "")
         if title and not content.startswith("#"):
@@ -287,7 +287,7 @@ def convert_pages_to_skill(
         saved_files.append(fpath)
 
     # カバレッジを更新
-    from knowledge_to_skills import _merge_page_ranges, _compute_unprocessed, _save_coverage
+    from knowledge_ingest import _merge_page_ranges, _compute_unprocessed, _save_coverage
 
     new_range = [start_page, end_page]
     processed = cov.get("processed_pages", [])
@@ -305,9 +305,9 @@ def convert_pages_to_skill(
     _append_to_index(doc_name, saved_files, start_page, end_page)
 
     return (
-        f"ページ {start_page}-{end_page} をスキル化しました。\n"
+        f"ページ {start_page}-{end_page} をナレッジ化しました。\n"
         f"  - {len(sections)}セクション生成\n"
-        f"  - 保存先: {skill_dir}/\n"
+        f"  - 保存先: {knowledge_dir}/\n"
         f"  - カバレッジ更新済み"
     )
 
@@ -319,10 +319,10 @@ def _append_to_index(
     end_page: int,
 ) -> None:
     """index.mdの既存doc_nameセクションに追記する。"""
-    if not os.path.isfile(SKILLS_INDEX):
+    if not os.path.isfile(KNOWLEDGE_INDEX):
         return
 
-    with open(SKILLS_INDEX, encoding="utf-8") as f:
+    with open(KNOWLEDGE_INDEX, encoding="utf-8") as f:
         content = f.read()
 
     # doc_nameセクションの末尾を見つけて追記
@@ -335,16 +335,16 @@ def _append_to_index(
         return
 
     # 追記エントリ
-    new_entries = [f"\n*[追加スキル化] ページ {start_page}-{end_page}:*"]
+    new_entries = [f"\n*[追加ナレッジ化] ページ {start_page}-{end_page}:*"]
     for fpath in saved_files:
-        rel = os.path.relpath(fpath, SKILLS_DIR)
+        rel = os.path.relpath(fpath, KNOWLEDGE_DIR)
         name = os.path.basename(fpath)
         new_entries.append(f"- [{name}]({rel})")
 
     insert_pos = match.end()
     new_content = content[:insert_pos] + "\n".join(new_entries) + "\n" + content[insert_pos:]
 
-    with open(SKILLS_INDEX, "w", encoding="utf-8") as f:
+    with open(KNOWLEDGE_INDEX, "w", encoding="utf-8") as f:
         f.write(new_content)
 
 
@@ -352,13 +352,13 @@ def _append_to_index(
 
 
 def _load_coverage_file(doc_name: str) -> dict | None:
-    """カバレッジファイルを読み込む。knowledge_to_skills.load_coverageのラッパー。"""
+    """カバレッジファイルを読み込む。knowledge_ingest.load_coverageのラッパー。"""
     try:
-        from knowledge_to_skills import load_coverage
+        from knowledge_ingest import load_coverage
         return load_coverage(doc_name)
     except ImportError:
         # フォールバック: 直接読み込み
-        path = os.path.join(SKILLS_DIR, doc_name, ".coverage.json")
+        path = os.path.join(KNOWLEDGE_DIR, doc_name, ".coverage.json")
         if os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as f:

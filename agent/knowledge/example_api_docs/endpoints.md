@@ -1,6 +1,6 @@
 # Example API Endpoints
 
-<!-- サンプルスキルファイル: 実際のAPIドキュメントから knowledge_to_skills.py で生成 -->
+<!-- サンプルナレッジファイル: 実際のAPIドキュメントから knowledge_ingest.py で生成 -->
 
 ## GET /users
 

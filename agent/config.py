@@ -56,9 +56,9 @@ TOKEN_SAFETY_MARGIN: float = 1.10
 MEMORY_FILE: str = os.getenv("MEMORY_FILE", "project_memory.md")
 MEMORY_LIMIT_BYTES: int = 25 * 1024  # 25KB
 
-# ── スキル ────────────────────────────────────────────────
-SKILLS_DIR: str = os.getenv("SKILLS_DIR", "skills")
-SKILLS_INDEX: str = os.path.join(SKILLS_DIR, "index.md")
+# ── ナレッジ ──────────────────────────────────────────────
+KNOWLEDGE_DIR: str = os.getenv("KNOWLEDGE_DIR", "knowledge")
+KNOWLEDGE_INDEX: str = os.path.join(KNOWLEDGE_DIR, "index.md")
 
 # ── ナレッジ取り込み ──────────────────────────────────────
 # 章分割の最小文字数（これ未満は前後と統合）
@@ -81,7 +81,7 @@ PDF_WORKERS: int = int(os.getenv("PDF_WORKERS", "4"))
 PAGES_PER_SECTION_FALLBACK: int = int(os.getenv("PAGES_PER_SECTION_FALLBACK", "10"))
 
 # ── ナレッジ処理上限 ─────────────────────────────────────
-# 1回の取り込みで処理するスキルの累計トークン数上限（0 = 無制限）
+# 1回の取り込みで処理するナレッジの累計トークン数上限（0 = 無制限）
 # 上限到達時はセクション境界で停止し、残りは未処理として記録する
 KNOWLEDGE_MAX_TOKENS: int = int(os.getenv("KNOWLEDGE_MAX_TOKENS", "0"))
 
@@ -89,7 +89,7 @@ KNOWLEDGE_MAX_TOKENS: int = int(os.getenv("KNOWLEDGE_MAX_TOKENS", "0"))
 PDF_RAW_READ_MAX_PAGES: int = int(os.getenv("PDF_RAW_READ_MAX_PAGES", "50"))
 
 # ── キャッシュ ────────────────────────────────────────────
-SKILLS_CACHE_FILE: str = os.getenv("SKILLS_CACHE_FILE", ".skills_cache.json")
+KNOWLEDGE_CACHE_FILE: str = os.getenv("KNOWLEDGE_CACHE_FILE", ".knowledge_cache.json")
 ENABLE_CACHE: bool = os.getenv("ENABLE_CACHE", "1") == "1"
 
 # ── ツール結果プレコンパクション ──────────────────────────

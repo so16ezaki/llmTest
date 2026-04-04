@@ -394,7 +394,7 @@ class KnowledgeTab(ttk.Frame):
 
         opt = _fr(self)
         opt.pack(fill="x", **P)
-        _lb(opt, "スキル名（省略可）", fg="muted", font=FONT_SM).pack(side="left")
+        _lb(opt, "ナレッジ名（省略可）", fg="muted", font=FONT_SM).pack(side="left")
 
         self._name_var = tk.StringVar()
         ttk.Entry(opt, textvariable=self._name_var, width=22).pack(
@@ -457,7 +457,7 @@ class KnowledgeTab(ttk.Frame):
         threading.Thread(target=self._work, daemon=True).start()
 
     def _work(self):
-        import knowledge_to_skills as k2s
+        import knowledge_ingest as k2s
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = _Writer(self._q)
         sys.stderr = _Writer(self._q, "err")
@@ -527,7 +527,7 @@ class KnowledgeManagerTab(ttk.Frame):
         _Btn(ing_row, "フォルダ…", self._ingest_pick_dir, role="neutral",
              px=10, py=6).set_cmd(self._ingest_pick_dir).pack(side="left", padx=(0, 12))
 
-        _lb(ing_row, "スキル名", fg="muted", font=FONT_SM).pack(side="left")
+        _lb(ing_row, "ナレッジ名", fg="muted", font=FONT_SM).pack(side="left")
         self._ing_name = tk.StringVar()
         ttk.Entry(ing_row, textvariable=self._ing_name, width=16).pack(
             side="left", padx=(6, 12))
@@ -632,7 +632,7 @@ class KnowledgeManagerTab(ttk.Frame):
         threading.Thread(target=self._ingest_work, daemon=True).start()
 
     def _ingest_work(self):
-        import knowledge_to_skills as k2s
+        import knowledge_ingest as k2s
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = _Writer(self._ingest_q)
         sys.stderr = _Writer(self._ingest_q, "err")
@@ -677,18 +677,18 @@ class KnowledgeManagerTab(ttk.Frame):
 
     def refresh(self):
         import json as _json
-        from config import SKILLS_DIR, SKILLS_INDEX
+        from config import KNOWLEDGE_DIR, KNOWLEDGE_INDEX
         for item in self._tree.get_children():
             self._tree.delete(item)
-        skills_abs = os.path.abspath(SKILLS_DIR)
-        if not os.path.isdir(skills_abs):
+        knowledge_abs = os.path.abspath(KNOWLEDGE_DIR)
+        if not os.path.isdir(knowledge_abs):
             self._status.set("0 件")
             return
-        sources = _parse_index_sources(SKILLS_INDEX) \
-            if os.path.isfile(SKILLS_INDEX) else {}
+        sources = _parse_index_sources(KNOWLEDGE_INDEX) \
+            if os.path.isfile(KNOWLEDGE_INDEX) else {}
         rows = []
-        for name in sorted(os.listdir(skills_abs)):
-            d = os.path.join(skills_abs, name)
+        for name in sorted(os.listdir(knowledge_abs)):
+            d = os.path.join(knowledge_abs, name)
             if not os.path.isdir(d): continue
             mds   = [f for f in os.listdir(d) if f.endswith(".md")]
             total = sum(os.path.getsize(os.path.join(d, f)) for f in mds)
@@ -737,7 +737,7 @@ class KnowledgeManagerTab(ttk.Frame):
 
     def _delete(self):
         import shutil
-        from config import SKILLS_DIR, SKILLS_INDEX
+        from config import KNOWLEDGE_DIR, KNOWLEDGE_INDEX
         sel = list(self._tree.selection())
         if not sel:
             messagebox.showinfo("未選択", "削除するナレッジを選択してください。")
@@ -749,14 +749,14 @@ class KnowledgeManagerTab(ttk.Frame):
             return
         errors = []
         for name in sel:
-            d = os.path.join(os.path.abspath(SKILLS_DIR), name)
+            d = os.path.join(os.path.abspath(KNOWLEDGE_DIR), name)
             try:
                 if os.path.isdir(d): shutil.rmtree(d)
             except Exception as e:
                 errors.append(f"{name}: {e}")
-        if os.path.isfile(SKILLS_INDEX):
+        if os.path.isfile(KNOWLEDGE_INDEX):
             try:
-                _remove_from_index(SKILLS_INDEX, sel)
+                _remove_from_index(KNOWLEDGE_INDEX, sel)
             except Exception as e:
                 errors.append(f"index.md: {e}")
         if errors:
@@ -872,7 +872,7 @@ class AgentTab(ttk.Frame):
         self._scope_lb.pack(side="left", fill="x", expand=True)
         sb.pack(side="right", fill="y")
 
-        _lb(self, "skills/  と  project_memory.md  は常に許可",
+        _lb(self, "knowledge/  と  project_memory.md  は常に許可",
             fg="muted", font=("Yu Gothic UI", 8)
             ).pack(anchor="w", padx=20, pady=(4, 0))
 
@@ -1386,7 +1386,7 @@ def _remove_from_index(path: str, names: list[str]) -> None:
             while i < len(lines) and not lines[i].startswith("### "):
                 i += 1
             continue
-        if line.lstrip().startswith("- path: skills/"):
+        if line.lstrip().startswith("- path: knowledge/"):
             parts = line.strip()[len("- path: "):].split("/")
             if len(parts) >= 2 and parts[1] in name_set:
                 i += 1

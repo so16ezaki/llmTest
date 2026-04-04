@@ -18,8 +18,8 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "list_skills",
-            "description": "利用可能なスキルファイルの一覧と概要を返す。",
+            "name": "list_knowledge",
+            "description": "利用可能なナレッジファイルの一覧と概要を返す。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -35,8 +35,8 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "skill_search",
-            "description": "index.mdの内容から、質問に関連するスキルを推薦する。",
+            "name": "knowledge_search",
+            "description": "index.mdの内容から、質問に関連するナレッジを推薦する。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -52,14 +52,14 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "read_skill",
-            "description": "指定スキルファイルの全文を返す（オンデマンドロード）。",
+            "name": "read_knowledge",
+            "description": "指定ナレッジファイルの全文を返す（オンデマンドロード）。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "スキルファイルのパス（skills/配下の相対パス）",
+                        "description": "ナレッジファイルのパス（knowledge/配下の相対パス）",
                     }
                 },
                 "required": ["path"],
@@ -70,7 +70,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "keyword_search",
-            "description": "全スキルファイルをgrep検索。正規表現対応。前後N行の文脈付きで返す。",
+            "description": "全ナレッジファイルをgrep検索。正規表現対応。前後N行の文脈付きで返す。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -127,7 +127,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "properties": {
                     "doc_name": {
                         "type": "string",
-                        "description": "ドキュメント名（skills/配下のディレクトリ名）",
+                        "description": "ドキュメント名（knowledge/配下のディレクトリ名）",
                     },
                     "start_page": {
                         "type": "integer",
@@ -145,15 +145,15 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "convert_pages_to_skill",
-            "description": "PDFの指定ページ範囲を正式なスキルファイルに変換して保存する。"
+            "name": "convert_pages_to_knowledge",
+            "description": "PDFの指定ページ範囲を正式なナレッジファイルに変換して保存する。"
                            "read_pdf_pagesで重要な内容を見つけた場合に使用する。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "doc_name": {
                         "type": "string",
-                        "description": "ドキュメント名（skills/配下のディレクトリ名）",
+                        "description": "ドキュメント名（knowledge/配下のディレクトリ名）",
                     },
                     "start_page": {
                         "type": "integer",
@@ -612,13 +612,13 @@ def execute_tool(name: str, args: dict[str, Any]) -> str:
     # モジュールのレイジーインポートで循環参照を回避
     dispatch: dict[str, tuple[str, str]] = {
         # (module_path, function_name)
-        "list_skills":      ("tools.search",          "list_skills"),
-        "skill_search":     ("tools.search",          "skill_search"),
-        "read_skill":       ("tools.search",          "read_skill"),
+        "list_knowledge":   ("tools.search",          "list_knowledge"),
+        "knowledge_search": ("tools.search",          "knowledge_search"),
+        "read_knowledge":   ("tools.search",          "read_knowledge"),
         "keyword_search":   ("tools.search",          "keyword_search"),
         "get_knowledge_coverage": ("tools.knowledge", "get_knowledge_coverage"),
         "read_pdf_pages":         ("tools.knowledge", "read_pdf_pages"),
-        "convert_pages_to_skill": ("tools.knowledge", "convert_pages_to_skill"),
+        "convert_pages_to_knowledge": ("tools.knowledge", "convert_pages_to_knowledge"),
         "scan_project":     ("tools.code",            "scan_project"),
         "read_source":      ("tools.code",            "read_source"),
         "grep_source":      ("tools.code",            "grep_source"),

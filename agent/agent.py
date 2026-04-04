@@ -19,10 +19,10 @@ from tool_registry import TOOL_DEFINITIONS, execute_tool
 # ── ツール結果リマインダー ────────────────────────────────────────
 # ツール結果に付与する固定テキスト。システムプロンプトより遵守率が高い。
 TOOL_REMINDERS: dict[str, str] = {
-    "read_skill":
+    "read_knowledge":
         "\n[reminder] 情報が不十分ならkeyword_searchで詳細を探してください。",
     "keyword_search":
-        "\n[reminder] 文脈が必要ならread_skillで全文を読んでください。",
+        "\n[reminder] 文脈が必要ならread_knowledgeで全文を読んでください。",
     "todo_write":
         "\n[reminder] TODOリストの次のタスクに進んでください。",
     "scan_project":
@@ -32,15 +32,15 @@ TOOL_REMINDERS: dict[str, str] = {
         " 静的解析が必要ならstatic_analysisも利用できます。",
     "static_analysis":
         "\n[reminder] 解析結果を解釈し、問題があればread_sourceで該当箇所を確認してください。",
-    "list_skills":
-        "\n[reminder] 関連するスキルはskill_searchで絞り込み、read_skillで詳細を読んでください。",
+    "list_knowledge":
+        "\n[reminder] 関連するナレッジはknowledge_searchで絞り込み、read_knowledgeで詳細を読んでください。",
     "read_pdf_pages":
-        "\n[reminder] 重要な内容を見つけた場合はconvert_pages_to_skillで"
-        "スキルファイルに変換すると、今後の検索で見つかりやすくなります。",
+        "\n[reminder] 重要な内容を見つけた場合はconvert_pages_to_knowledgeで"
+        "ナレッジファイルに変換すると、今後の検索で見つかりやすくなります。",
     "get_knowledge_coverage":
         "\n[reminder] 未処理ページの内容を確認するにはread_pdf_pagesを使ってください。",
-    "convert_pages_to_skill":
-        "\n[reminder] 変換が完了しました。keyword_searchやskill_searchで検索可能になりました。",
+    "convert_pages_to_knowledge":
+        "\n[reminder] 変換が完了しました。keyword_searchやknowledge_searchで検索可能になりました。",
     "sub_agent":
         "\n[reminder] サブエージェントの結果を評価し、"
         " 不十分な場合は追加の指示で再度委任してください。",
@@ -80,8 +80,8 @@ def _format_tool_call(name: str, args: dict) -> str:
         if symbol:
             return f"[read] {label}::{symbol}"
         return f"[read] {label}"
-    if name == "read_skill":
-        return f"[read_skill] {args.get('path', '')}"
+    if name == "read_knowledge":
+        return f"[read_knowledge] {args.get('path', '')}"
     if name == "scan_project":
         return f"[scan] {args.get('path', '')}"
     if name == "grep_source":
@@ -103,7 +103,7 @@ def _format_tool_call(name: str, args: dict) -> str:
         return f"[read_pdf] {args.get('doc_name', '')} p.{args.get('start_page', '')}-{args.get('end_page', '')}"
     if name == "get_knowledge_coverage":
         return f"[coverage] {args.get('doc_name', 'all')}"
-    if name == "convert_pages_to_skill":
+    if name == "convert_pages_to_knowledge":
         return f"[convert] {args.get('doc_name', '')} p.{args.get('start_page', '')}-{args.get('end_page', '')}"
     # デフォルト: ツール名と引数を短縮表示
     args_str = json.dumps(args, ensure_ascii=False)[:60]
@@ -126,7 +126,7 @@ def agent_loop(
         Trueの場合、各ターンの状況を標準エラー出力に出力する
     extra_context:
         セッション限りの追加コンテキスト。
-        システムプロンプトの末尾に注入され、skills/には保存されない。
+        システムプロンプトの末尾に注入され、knowledge/には保存されない。
     """
     # 初期メッセージ構築
     system_prompt = build_system_prompt()
