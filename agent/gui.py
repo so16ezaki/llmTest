@@ -220,6 +220,7 @@ class _Btn(tk.Label):
     def __init__(self, parent, text, cmd, role="primary", px=14, py=7, **kw):
         self._role = role
         self._disabled = False
+        self._cmd = cmd
         bg_k, _, fg_k = self._palette()
         super().__init__(
             parent, text=text, bg=C[bg_k], fg=C[fg_k],
@@ -380,11 +381,12 @@ class KnowledgeTab(ttk.Frame):
         self._path_var = tk.StringVar(value="未選択")
         path_row = _fr(self)
         path_row.pack(fill="x", padx=20, pady=(6, 0))
-        _tag(tk.Label(
+        path_lbl = _tag(tk.Label(
             path_row, textvariable=self._path_var,
             bg=C["bg"], fg=C["muted"],
             font=FONT_MONO, anchor="w", wraplength=600,
-        ).pack(fill="x"), bg="bg", fg="muted")
+        ), bg="bg", fg="muted")
+        path_lbl.pack(fill="x")
 
         ttk.Separator(self, orient="horizontal").pack(
             fill="x", padx=20, pady=14)
@@ -594,10 +596,10 @@ class KnowledgeManagerTab(ttk.Frame):
 
         # ── ステータス ──
         self._status = tk.StringVar(value="")
-        _tag(tk.Label(self, textvariable=self._status,
-                      bg=C["bg"], fg=C["muted"], font=FONT_SM, anchor="w"
-                      ).pack(fill="x", padx=20, pady=(6, 14)),
+        status_lbl2 = _tag(tk.Label(self, textvariable=self._status,
+                      bg=C["bg"], fg=C["muted"], font=FONT_SM, anchor="w"),
              bg="bg", fg="muted")
+        status_lbl2.pack(fill="x", padx=20, pady=(6, 14))
 
     # ── 取り込み ──
 
@@ -885,9 +887,10 @@ class AgentTab(ttk.Frame):
         _sect(sn_hdr, "セッションナレッジ  —  このセッション限りのコンテキスト").pack(
             side="left")
         self._sn_tok_var = tk.StringVar(value="")
-        _tag(tk.Label(sn_hdr, textvariable=self._sn_tok_var,
-                      bg=C["bg"], fg=C["muted"], font=FONT_SM
-                      ).pack(side="right"), bg="bg", fg="muted")
+        sn_tok_lbl = _tag(tk.Label(sn_hdr, textvariable=self._sn_tok_var,
+                      bg=C["bg"], fg=C["muted"], font=FONT_SM),
+             bg="bg", fg="muted")
+        sn_tok_lbl.pack(side="right")
 
         sn_bar = _fr(self)
         sn_bar.pack(fill="x", padx=20)
@@ -903,8 +906,7 @@ class AgentTab(ttk.Frame):
             sn_inner, height=3, font=FONT_MONO,
             bg=C["input"], fg=C["text"],
             selectbackground=C["sel_bg"], selectforeground=C["sel_fg"],
-            borderwidth=0, highlightthickness=0, activestyle="none",
-            state="disabled")
+            borderwidth=0, highlightthickness=0, activestyle="none")
         _tag(self._sn_lb, bg="input", fg="text",
              selectbackground="sel_bg", selectforeground="sel_fg")
         sn_sb = ttk.Scrollbar(sn_inner, orient="vertical",
@@ -1014,16 +1016,12 @@ class AgentTab(ttk.Frame):
         if p not in self._session_docs:
             self._session_docs.append(p)
             display = os.path.basename(p) if os.path.isdir(p) else p
-            self._sn_lb.configure(state="normal")
             self._sn_lb.insert("end", display)
-            self._sn_lb.configure(state="disabled")
             self._sn_update_tokens()
 
     def _sn_clear(self):
         self._session_docs.clear()
-        self._sn_lb.configure(state="normal")
         self._sn_lb.delete(0, "end")
-        self._sn_lb.configure(state="disabled")
         self._sn_tok_var.set("")
 
     def _sn_remove_selected(self, _event=None):
@@ -1031,9 +1029,7 @@ class AgentTab(ttk.Frame):
         if not sel:
             return
         for i in reversed(sel):
-            self._sn_lb.configure(state="normal")
             self._sn_lb.delete(i)
-            self._sn_lb.configure(state="disabled")
             if i < len(self._session_docs):
                 self._session_docs.pop(i)
         self._sn_update_tokens()
@@ -1330,8 +1326,16 @@ class _MdViewer(tk.Toplevel):
                     self._txt.insert("end", part)
 
     def _open_system(self) -> None:
+        import platform
+        import subprocess
         try:
-            os.startfile(self._path)
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(self._path)
+            elif system == "Darwin":
+                subprocess.Popen(["open", self._path])
+            else:
+                subprocess.Popen(["xdg-open", self._path])
         except Exception as e:
             messagebox.showerror("エラー", str(e), parent=self)
 
