@@ -85,6 +85,10 @@ PAGES_PER_SECTION_FALLBACK: int = int(os.getenv("PAGES_PER_SECTION_FALLBACK", "1
 # 上限到達時はセクション境界で停止し、残りは未処理として記録する
 KNOWLEDGE_MAX_TOKENS: int = int(os.getenv("KNOWLEDGE_MAX_TOKENS", "0"))
 
+# PDF読み込みページ数推定の基準（トークン/ページ）
+# KNOWLEDGE_MAX_TOKENS > 0 の場合、max_pages = KNOWLEDGE_MAX_TOKENS // この値 で読み込みページ数を制限する
+PDF_TOKENS_PER_PAGE_ESTIMATE: int = int(os.getenv("PDF_TOKENS_PER_PAGE_ESTIMATE", "500"))
+
 # エージェント実行時のPDF直接読み取り最大ページ数（1回のツール呼び出しあたり）
 PDF_RAW_READ_MAX_PAGES: int = int(os.getenv("PDF_RAW_READ_MAX_PAGES", "50"))
 

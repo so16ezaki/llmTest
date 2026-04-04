@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import os
 import queue
+import re
 import sys
 import threading
 import tkinter as tk
@@ -545,6 +546,32 @@ class KnowledgeManagerTab(ttk.Frame):
             bg="bg", fg="muted")
         status_lbl.pack(fill="x", padx=20, pady=(4, 0))
 
+        # ── 進捗バー（ナレッジ化処理中のみ表示） ──
+        self._prog_area = _fr(self)
+        self._prog_area.pack(fill="x", padx=20, pady=(2, 0))
+
+        # 章進捗行（処理開始時に pack する）
+        self._ch_row = _fr(self._prog_area)
+        _lb(self._ch_row, "章:", fg="muted", font=FONT_SM).pack(side="left", padx=(0, 4))
+        self._prog_ch = ttk.Progressbar(self._ch_row, length=280, mode="determinate")
+        self._prog_ch.pack(side="left")
+        self._prog_ch_txt = tk.StringVar(value="")
+        _ch_txt_lbl = tk.Label(self._ch_row, textvariable=self._prog_ch_txt,
+                               bg=C["bg"], fg=C["muted"], font=FONT_SM)
+        _ch_txt_lbl.pack(side="left", padx=(6, 0))
+        _tag(_ch_txt_lbl, bg="bg", fg="muted")
+
+        # トークン進捗行（処理開始時に pack する）
+        self._tk_row = _fr(self._prog_area)
+        _lb(self._tk_row, "トークン:", fg="muted", font=FONT_SM).pack(side="left", padx=(0, 4))
+        self._prog_tk = ttk.Progressbar(self._tk_row, length=280, mode="determinate")
+        self._prog_tk.pack(side="left")
+        self._prog_tk_txt = tk.StringVar(value="")
+        _tk_txt_lbl = tk.Label(self._tk_row, textvariable=self._prog_tk_txt,
+                               bg=C["bg"], fg=C["muted"], font=FONT_SM)
+        _tk_txt_lbl.pack(side="left", padx=(6, 0))
+        _tag(_tk_txt_lbl, bg="bg", fg="muted")
+
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=20, pady=12)
 
         # ━━ 一覧ツールバー ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -627,8 +654,21 @@ class KnowledgeManagerTab(ttk.Frame):
             messagebox.showwarning("未選択", "ファイルまたはフォルダを選択してください。")
             return
         self._ingest_running = True
+        self._bars_initialized = False   # init行受信前はFalse
         self._ing_run_btn.enable(False)
-        self._ing_status.set(f"処理中: {self._ing_path}")
+        # 進捗バーをリセットして indeterminate モードで表示（init行が来るまで）
+        self._prog_ch.stop()
+        self._prog_ch.configure(mode="indeterminate", maximum=100)
+        self._prog_ch_txt.set("読み込み中...")
+        self._prog_tk.stop()
+        self._prog_tk.configure(mode="indeterminate", maximum=100)
+        self._prog_tk_txt.set("計算中...")
+        self._ch_row.pack(fill="x", pady=(2, 1))
+        self._tk_row.pack(fill="x", pady=(1, 4))
+        self._prog_ch.start(50)
+        self._prog_tk.start(50)
+        # 即時フィードバック
+        self._ing_status.set("解析中...")
         threading.Thread(target=self._ingest_work, daemon=True).start()
 
     def _ingest_work(self):
@@ -636,6 +676,7 @@ class KnowledgeManagerTab(ttk.Frame):
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = _Writer(self._ingest_q)
         sys.stderr = _Writer(self._ingest_q, "err")
+        k2s._on_progress = lambda ev, **kw: self._ingest_q.put(("__progress__", {"event": ev, **kw}))
         try:
             p    = self._ing_path
             name = self._ing_name.get().strip() or None
@@ -649,8 +690,20 @@ class KnowledgeManagerTab(ttk.Frame):
         except Exception as e:
             self._ingest_q.put(("err", f"エラー: {e}"))
         finally:
+            k2s._on_progress = None
             sys.stdout, sys.stderr = old_out, old_err
             self._ingest_q.put(("__done__", ""))
+
+    # 進捗解析用の正規表現（コンパイル済み）
+    # _RE_INIT: PDF階層処理（BFS）と通常処理の両方に対応
+    _RE_INIT  = re.compile(r"(?:階層並列処理|セクション処理): (\d+)章.*予算([\d,]+)トークン")
+    _RE_CH    = re.compile(r"\[(\d+)/(\d+)\].*累計([\d,]+)")
+    _RE_LIMIT = re.compile(r"トークン予算超過")
+    # [1/4] 等のステップ行（セクション処理前の読み込み・分割ステップ）
+    _RE_STEP  = re.compile(r"\[(\d)/4\]")
+    _STEP_LABEL = {1: "読み込み中...", 2: "分割中...", 3: "構造化中...", 4: "書き出し中..."}
+    # PDF並列変換の進捗行（readers/pdf.py の _print_progress）
+    _RE_PDF   = re.compile(r"PDF変換:.*\((\d+)/(\d+)チャンク\)")
 
     def _ingest_poll(self):
         try:
@@ -659,16 +712,112 @@ class KnowledgeManagerTab(ttk.Frame):
                 if tag == "__done__":
                     self._ingest_running = False
                     self._ing_run_btn.enable(True)
+                    self._prog_ch.stop()
+                    self._prog_tk.stop()
+                    self._ch_row.pack_forget()
+                    self._tk_row.pack_forget()
                     self.refresh()
-                elif tag == "err":
-                    self._ing_status.set(text.strip())
-                elif tag == "ok":
-                    self._ing_status.set(text.strip())
-                else:
-                    # 処理中ファイル名を1行で表示
-                    line = text.strip()
-                    if line:
-                        self._ing_status.set(line[:100])
+                    continue
+                if tag == "__progress__":
+                    d = text  # dict passed directly
+                    ev = d.get("event", "")
+                    if ev == "init":
+                        ch_n = int(d.get("ch_n", 1))
+                        tk_n = int(d.get("tk_n", 1))
+                        self._prog_ch.stop()
+                        self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
+                        self._prog_ch["value"] = 0
+                        self._prog_ch_txt.set(f"0/{ch_n} 章")
+                        self._prog_tk.stop()
+                        self._prog_tk.configure(mode="determinate", maximum=max(tk_n, 1))
+                        self._prog_tk["value"] = 0
+                        self._prog_tk_txt.set(f"0/{tk_n:,} トークン")
+                        self._ing_status.set(f"処理中... ({ch_n}章 / 予算{tk_n:,}トークン)")
+                        self._bars_initialized = True
+                    elif ev == "chunk":
+                        ch_i   = int(d.get("ch_i", 0))
+                        ch_n   = int(d.get("ch_n", 1))
+                        tk_cum = int(d.get("tk_cum", 0))
+                        if not self._bars_initialized:
+                            self._prog_ch.stop()
+                            self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
+                            self._bars_initialized = True
+                        tk_max = int(self._prog_tk["maximum"])
+                        self._prog_ch["value"] = ch_i
+                        self._prog_ch_txt.set(f"{ch_i}/{ch_n} 章")
+                        if self._prog_tk["mode"] == "determinate":
+                            self._prog_tk["value"] = min(tk_cum, tk_max)
+                            self._prog_tk_txt.set(f"{tk_cum:,}/{tk_max:,} トークン")
+                        else:
+                            self._prog_tk_txt.set(f"{tk_cum:,}/-- トークン")
+                    continue
+                line = text.strip()
+                if not line:
+                    continue
+                # init行: 章数・トークン予算を取得して determinate に切り替え
+                m = self._RE_INIT.search(line)
+                if m:
+                    ch_n = int(m.group(1))
+                    tk_n = int(m.group(2).replace(",", ""))
+                    self._prog_ch.stop()
+                    self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
+                    self._prog_ch["value"] = 0
+                    self._prog_ch_txt.set(f"0/{ch_n} 章")
+                    self._prog_tk.stop()
+                    self._prog_tk.configure(mode="determinate", maximum=max(tk_n, 1))
+                    self._prog_tk["value"] = 0
+                    self._prog_tk_txt.set(f"0/{tk_n:,} トークン")
+                    self._ing_status.set(f"処理中... ({ch_n}章 / 予算{tk_n:,}トークン)")
+                    self._bars_initialized = True
+                    continue
+                # 章完了行: [i/N] ... 累計T
+                m = self._RE_CH.search(line)
+                if m:
+                    ch_i   = int(m.group(1))
+                    ch_n   = int(m.group(2))
+                    tk_cum = int(m.group(3).replace(",", ""))
+                    # init行が来る前にチャンク行が届いた場合
+                    # → 章バーだけ determinate に切り替え、tokenバーは init 待ち
+                    if not self._bars_initialized:
+                        self._prog_ch.stop()
+                        self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
+                        self._bars_initialized = True
+                    tk_max = int(self._prog_tk["maximum"])
+                    self._prog_ch["value"] = ch_i
+                    self._prog_ch_txt.set(f"{ch_i}/{ch_n} 章")
+                    # token バーが determinate になっている場合のみ value を更新
+                    if self._prog_tk["mode"] == "determinate":
+                        self._prog_tk["value"] = min(tk_cum, tk_max)
+                        self._prog_tk_txt.set(f"{tk_cum:,}/{tk_max:,} トークン")
+                    else:
+                        self._prog_tk_txt.set(f"{tk_cum:,}/... トークン")
+                    self._ing_status.set(line[:100])
+                    continue
+                # トークン予算超過
+                if self._RE_LIMIT.search(line):
+                    tk_max = int(self._prog_tk["maximum"])
+                    self._prog_tk["value"] = tk_max
+                    self._prog_tk_txt.set(f"{tk_max:,}/{tk_max:,} トークン")
+                    self._ing_status.set("トークン上限到達 — セクション境界で停止中...")
+                    continue
+                # PDF並列変換の進捗行: チャンク単位で両ラベルを更新
+                mp = self._RE_PDF.search(line)
+                if mp and not self._bars_initialized:
+                    c_i = int(mp.group(1))
+                    c_n = int(mp.group(2))
+                    pct = c_i * 100 // max(c_n, 1)
+                    self._prog_ch_txt.set(f"PDF変換中... {pct}%（{c_i}/{c_n}）")
+                    self._prog_tk_txt.set("読み込み中...")
+                    self._ing_status.set(line[:100])
+                    continue
+                # [N/4] ステップ行: indeterminate 中に意味のあるテキストを表示
+                ms = self._RE_STEP.search(line)
+                if ms and not self._bars_initialized:
+                    step = int(ms.group(1))
+                    label = self._STEP_LABEL.get(step, "処理中...")
+                    self._prog_ch_txt.set(label)
+                    self._prog_tk_txt.set(label)
+                self._ing_status.set(line[:100])
         except queue.Empty:
             pass
         self.after(100, self._ingest_poll)

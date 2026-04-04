@@ -13,8 +13,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from config import PDF_CHUNK_PAGES, PDF_PARALLEL_THRESHOLD, PDF_WORKERS
 
 
-def read(filepath: str) -> str:
-    """PDFをMarkdown形式に変換して返す。"""
+def read(filepath: str, max_pages: int | None = None) -> str:
+    """PDFをMarkdown形式に変換して返す。
+
+    Args:
+        filepath: PDFファイルパス
+        max_pages: 読み込む最大ページ数。None または 0 で全ページ。
+    """
     try:
         import fitz
     except ImportError:
@@ -26,22 +31,33 @@ def read(filepath: str) -> str:
     total_pages = len(doc)
     doc.close()
 
+    # ページ上限を適用
+    if max_pages and max_pages < total_pages:
+        print(
+            f"  ページ上限適用: {total_pages}ページ中 先頭{max_pages}ページのみ処理",
+            file=sys.stderr,
+        )
+        total_pages = max_pages
+
     # 小さいPDFは一括処理
     if total_pages <= PDF_PARALLEL_THRESHOLD:
-        return _convert_all(filepath)
+        return _convert_all(filepath, page_end=total_pages)
 
     # 大きいPDFはチャンク並列処理
     print(f"  大規模PDF検出（{total_pages}ページ）— 並列処理を使用", file=sys.stderr)
     return _convert_parallel(filepath, total_pages)
 
 
-def _convert_all(filepath: str) -> str:
-    """pymupdf4llmで全ページを一括変換する。"""
+def _convert_all(filepath: str, page_end: int | None = None) -> str:
+    """pymupdf4llmで全ページ（またはpage_endまで）を一括変換する。"""
     try:
         import pymupdf4llm
+        if page_end is not None:
+            pages = list(range(0, page_end))
+            return pymupdf4llm.to_markdown(filepath, pages=pages)
         return pymupdf4llm.to_markdown(filepath)
-    except ImportError:
-        return _convert_fitz_fallback(filepath, 0, None)
+    except (ImportError, TypeError):
+        return _convert_fitz_fallback(filepath, 0, page_end)
 
 
 def _convert_chunk(args: tuple) -> tuple[int, str]:
@@ -108,6 +124,21 @@ def _convert_parallel(filepath: str, total_pages: int) -> str:
     # チャンク順で結合
     ordered = [results[i] for i in range(total_chunks)]
     return "\n\n".join(ordered)
+
+
+def convert_chapter(args: tuple) -> tuple[int, str, str]:
+    """
+    1章分のページをMarkdownに変換する（ProcessPoolExecutorで実行）。
+
+    Args: (filepath, chapter_idx, page_start, page_end, title)
+      page_start: 開始ページ（0-indexed, inclusive）
+      page_end:   終了ページ（0-indexed, exclusive）
+
+    Returns: (chapter_idx, title, markdown)
+    """
+    filepath, chapter_idx, page_start, page_end, title = args
+    _, md = _convert_chunk((filepath, chapter_idx, page_start, page_end))
+    return (chapter_idx, title, md)
 
 
 def _print_progress(completed: int, total: int) -> None:

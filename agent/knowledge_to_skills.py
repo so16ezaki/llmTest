@@ -29,18 +29,32 @@ import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 from config import (
     ENABLE_CACHE,
     KNOWLEDGE_MAX_TOKENS,
     PAGES_PER_SECTION_FALLBACK,
+    PDF_TOKENS_PER_PAGE_ESTIMATE,
+    PDF_WORKERS,
     SECTION_MAX_CHARS,
     SECTION_MIN_CHARS,
     SKILLS_CACHE_FILE,
     SKILLS_DIR,
     SKILLS_INDEX,
 )
+
+# GUI進捗コールバック（GUIから設定される。Noneなら無効）
+_on_progress = None
+
+
+def _emit_progress(event: str, **kwargs) -> None:
+    """GUI進捗コールバックを安全に呼び出す。"""
+    if _on_progress is not None:
+        try:
+            _on_progress(event, **kwargs)
+        except Exception:
+            pass
 
 
 def main() -> None:
@@ -223,6 +237,185 @@ def _apply_token_limit(
     return sections, []
 
 
+# ── PDF階層並列処理 ───────────────────────────────────────────────
+
+
+def _build_bfs_chapters(
+    toc: list[tuple[int, str, int]], total_pages: int
+) -> list[dict]:
+    """
+    TOCからBFS順（浅い階層 → 深い階層）の章リストを構築する。
+
+    ページ範囲の計算方針:
+    - end = 「同レベルの次エントリ」の開始ページ直前（最低 start+1 ページを保証）
+    - Lv1 章は "章タイトル〜次章タイトル直前" の全内容を保持する
+    - Lv2 以下も同様に、同レベル内での自然な境界を使う
+
+    返す順序は Lv1 全章 → Lv2 全章 → … の BFS 順。
+    トークン予算が Lv1 で尽きれば全章の概要が、余れば Lv2 以降で詳細が追加される。
+
+    Returns: [{"level": int, "title": str, "start_page": int, "end_page": int}, ...]
+    """
+    if not toc:
+        return []
+
+    levels = sorted(set(l for l, _, _ in toc))
+    bfs: list[dict] = []
+
+    for lvl in levels:
+        # このレベルのエントリのみ（ページ順）
+        same_level = [(title, page) for l, title, page in toc if l == lvl]
+
+        for i, (title, page_num) in enumerate(same_level):
+            start = max(0, page_num - 1)       # 1-indexed → 0-indexed
+            if i + 1 < len(same_level):
+                # 同レベルの次エントリまで、最低 1 ページ確保
+                end = max(start + 1, same_level[i + 1][1] - 1)
+            else:
+                end = total_pages
+            bfs.append({
+                "level":      lvl,
+                "title":      title,
+                "start_page": start,
+                "end_page":   end,
+            })
+
+    return bfs
+
+
+def _process_pdf_hierarchical(
+    filepath: str,
+    max_tokens: int,
+    use_llm: bool = False,
+    doc_name: str = "",
+) -> tuple[list[dict], bool]:
+    """
+    BFS順（浅い階層 → 深い階層）でPDFをナレッジ化し、トークン予算内のセクションを返す。
+
+    処理フロー:
+    1. TOC → BFS順章リストを構築（Lv1全章 → Lv2全章 → …）
+    2. BFS順で ProcessPoolExecutor に並列サブミット
+    3. 章の完了をBFS順に待ちながらセクション分割 & トークン計測
+    4. 予算超過した章でキャンセル → Lv1が終われば全体の概要が確定する
+
+    Returns: (sections, is_partial)
+    """
+    from readers.pdf import convert_chapter, extract_toc, get_page_count
+
+    total_pages = get_page_count(filepath)
+    toc = extract_toc(filepath)
+
+    # BFS章リスト構築
+    chapters = _build_bfs_chapters(toc, total_pages)
+    if not chapters:
+        # TOCなし → ページチャンクに分割（フォールバック）
+        chunk = PAGES_PER_SECTION_FALLBACK * 5
+        chapters = [
+            {
+                "level":      1,
+                "title":      f"Pages {s + 1}-{min(s + chunk, total_pages)}",
+                "start_page": s,
+                "end_page":   min(s + chunk, total_pages),
+            }
+            for s in range(0, total_pages, chunk)
+        ]
+
+    # BFS 構成サマリを表示
+    level_counts: dict[int, int] = {}
+    for ch in chapters:
+        level_counts[ch["level"]] = level_counts.get(ch["level"], 0) + 1
+    level_summary = " → ".join(
+        f"Lv{l}×{n}" for l, n in sorted(level_counts.items())
+    )
+    print(
+        f"  階層並列処理: {len(chapters)}章 / {total_pages}ページ / "
+        f"予算{max_tokens:,}トークン  [{level_summary}]",
+        file=sys.stderr,
+    )
+    _emit_progress("init", ch_n=len(chapters), tk_n=max_tokens)
+
+    # トークンカウンター（tiktoken 優先、なければ文字数÷4）
+    try:
+        import tiktoken
+        _enc = tiktoken.get_encoding("cl100k_base")
+        def _count_tokens(text: str) -> int:
+            return len(_enc.encode(text))
+    except ImportError:
+        def _count_tokens(text: str) -> int:
+            return len(text) // 4
+
+    # 全章を BFS 順で並列サブミット
+    jobs = [
+        (filepath, i, ch["start_page"], ch["end_page"], ch["title"])
+        for i, ch in enumerate(chapters)
+    ]
+
+    all_sections: list[dict] = []
+    total_tokens = 0
+    is_partial = False
+
+    with ProcessPoolExecutor(max_workers=PDF_WORKERS) as executor:
+        future_list = [executor.submit(convert_chapter, job) for job in jobs]
+
+        for i, future in enumerate(future_list):
+            ch = chapters[i]
+            ch_title = ch["title"]
+            ch_level = ch["level"]
+
+            try:
+                _, title, markdown = future.result()
+            except Exception as e:
+                print(f"  [warning] 章'{ch_title}'の変換失敗: {e}", file=sys.stderr)
+                continue
+
+            # セクション分割
+            ch_sections = split_sections(markdown)
+            ch_sections = merge_small_sections(ch_sections, min_chars=SECTION_MIN_CHARS)
+            ch_sections = split_large_sections(ch_sections, max_chars=SECTION_MAX_CHARS)
+            if not ch_sections:
+                continue
+
+            # ページ範囲を各セクションに付与（章単位の情報なので全セクション共通）
+            ch_page_start = ch["start_page"] + 1  # 0-indexed → 1-indexed
+            ch_page_end = ch["end_page"]
+            for s in ch_sections:
+                s.setdefault("page_start", ch_page_start)
+                s.setdefault("page_end", ch_page_end)
+
+            # LLM構造化（オプション）
+            if use_llm and doc_name:
+                ch_sections = _llm_structure(ch_sections, doc_name)
+
+            # トークン計測
+            ch_tokens = sum(_count_tokens(s.get("content", "")) for s in ch_sections)
+
+            # 予算チェック: すでに1章以上あり、この章を追加すると超過するなら停止
+            if all_sections and total_tokens + ch_tokens > max_tokens:
+                is_partial = True
+                print(
+                    f"  トークン予算超過: Lv{ch_level}章'{ch_title}'で停止"
+                    f"（累計{total_tokens:,} + {ch_tokens:,} > {max_tokens:,}）"
+                    f"\n  残り{len(chapters) - i}エントリは未処理",
+                    file=sys.stderr,
+                )
+                # 残りのフューチャーをキャンセル
+                for remaining in future_list[i + 1:]:
+                    remaining.cancel()
+                break
+
+            all_sections.extend(ch_sections)
+            total_tokens += ch_tokens
+            print(
+                f"  [{i + 1}/{len(chapters)}] Lv{ch_level}: {ch_title}"
+                f" — {len(ch_sections)}セクション, {ch_tokens:,}トークン"
+                f"（累計{total_tokens:,}）",
+                file=sys.stderr,
+            )
+            _emit_progress("chunk", ch_i=i + 1, ch_n=len(chapters), tk_cum=total_tokens)
+
+    return all_sections, is_partial
+
+
 # ── カバレッジ管理 ────────────────────────────────────────────────
 
 
@@ -339,12 +532,36 @@ def _process_file(
     is_pdf = filepath.lower().endswith(".pdf")
 
     # チェックポイントからの再開
+    _used_hierarchical = False  # 階層並列処理を使ったか（進捗出力の重複を防ぐ）
     checkpoint = None if force else _load_checkpoint(doc_name)
     if checkpoint and checkpoint.get("status") == "sections_ready":
         print(f"  チェックポイントから再開（{checkpoint.get('sections_count', '?')}セクション）")
         sections = checkpoint["sections"]
+        is_partial = checkpoint.get("partial", False)
+        remaining = []
+    elif is_pdf and KNOWLEDGE_MAX_TOKENS > 0:
+        # PDF + トークン上限あり: TOC階層ごとに並列変換し、章境界で停止
+        _used_hierarchical = True
+        print("  [1-3/4] 階層並列変換（TOC章単位）...", file=sys.stderr)
+        try:
+            sections, is_partial = _process_pdf_hierarchical(
+                filepath, KNOWLEDGE_MAX_TOKENS, use_llm=use_llm, doc_name=doc_name
+            )
+        except Exception as e:
+            print(f"  [error] 階層処理失敗: {e}", file=sys.stderr)
+            return
+        remaining = []
+
+        # チェックポイント保存
+        _save_checkpoint(doc_name, {
+            "status": "sections_ready",
+            "sections": sections,
+            "sections_count": len(sections),
+            "filepath": filepath,
+            "partial": is_partial,
+        })
     else:
-        # Markdown変換
+        # 通常処理（PDF以外 or トークン上限なし）
         print("  [1/4] ファイル読み込み・変換...", file=sys.stderr)
         from readers import read_file
         try:
@@ -378,23 +595,40 @@ def _process_file(
             "filepath": filepath,
         })
 
-    # トークン数上限を適用
-    all_sections = sections
-    sections, remaining = _apply_token_limit(sections, KNOWLEDGE_MAX_TOKENS)
-    is_partial = bool(remaining)
-    if is_partial:
+        # トークン数上限を適用（階層処理の場合は適用済みのためこちらは不要）
+        all_sections = sections
+        sections, remaining = _apply_token_limit(sections, KNOWLEDGE_MAX_TOKENS)
+        is_partial = bool(remaining)
+
+    all_sections = sections  # カバレッジ計算用
+    if is_partial and remaining:
+        # 従来処理（セクション単位での打ち切り）の場合のみ残数を表示
         print(
-            f"  トークン上限到達: {len(sections)}/{len(all_sections)}セクションを処理"
+            f"  トークン上限到達: {len(sections)}セクションを処理"
             f"（残り{len(remaining)}セクション）",
             file=sys.stderr,
         )
 
     # 保存
-    print(f"  [4/4] {len(sections)}セクションを書き出し...", file=sys.stderr)
     skill_dir = os.path.join(SKILLS_DIR, doc_name)
     os.makedirs(skill_dir, exist_ok=True)
 
-    saved_files = _write_sections_parallel(sections, skill_dir)
+    _src_name = os.path.basename(filepath)
+    if not _used_hierarchical:
+        # 通常処理パス: GUI進捗バー用に init 行を出力してからセクションを書き出す
+        _sec_chars = sum(len(s.get("content", "")) for s in sections)
+        _sec_max_tok = max(
+            KNOWLEDGE_MAX_TOKENS if KNOWLEDGE_MAX_TOKENS > 0 else _sec_chars // 4, 1
+        )
+        print(
+            f"  セクション処理: {len(sections)}章 / 予算{_sec_max_tok:,}トークン",
+            file=sys.stderr,
+        )
+        _emit_progress("init", ch_n=len(sections), tk_n=_sec_max_tok)
+        saved_files = _write_sections_parallel(sections, skill_dir, source_name=_src_name, _report_progress=True)
+    else:
+        print(f"  [4/4] {len(sections)}セクションを書き出し...", file=sys.stderr)
+        saved_files = _write_sections_parallel(sections, skill_dir, source_name=_src_name, _report_progress=False)
 
     # カバレッジ情報を構築・保存
     total_pages = 0
@@ -446,8 +680,44 @@ def _process_file(
     print(f"  完了{partial_note}（{len(sections)}セクション, {elapsed:.1f}秒）")
 
 
-def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple[str, str, str]]:
+def _build_citation_header(
+    section: dict, section_idx: int, total_sections: int, source_name: str
+) -> str:
+    """スキルファイル先頭に埋め込む引用情報ブロックを生成する。"""
+    parts: list[str] = []
+    if source_name:
+        parts.append(f"出典: `{source_name}`")
+    ps = section.get("page_start")
+    pe = section.get("page_end")
+    tp = section.get("toc_page")
+    if ps and pe:
+        parts.append(f"p.{ps}–{pe}")
+    elif tp:
+        parts.append(f"p.{tp}〜")
+    parts.append(f"§{section_idx}/{total_sections}")
+    if not parts:
+        return ""
+    return f"> 📍 {' | '.join(parts)}\n\n"
+
+
+def _write_sections_parallel(
+    sections: list[dict], skill_dir: str, source_name: str = "", _report_progress: bool = False
+) -> list[tuple[str, str, str]]:
     """セクションファイルを並列で書き出す。Returns: [(path, title, summary), ...]"""
+    import threading as _th
+
+    total = len(sections)
+
+    # 進捗報告用: 文字数÷4でトークン概算（tiktokenなしでも動作）
+    if _report_progress:
+        tok_counts = [len(s.get("content", "")) // 4 for s in sections]
+        _done = [0]
+        _cum_tok = [0]
+        _lock = _th.Lock()
+    else:
+        tok_counts = []
+        _done = _cum_tok = _lock = None  # type: ignore[assignment]
+
     def write_one(args):
         i, section = args
         filename = f"section_{i+1:02d}.md"
@@ -458,9 +728,33 @@ def _write_sections_parallel(sections: list[dict], skill_dir: str) -> list[tuple
         content = section.get("content", "")
         if section.get("title") and not content.startswith("#"):
             content = f"# {section['title']}\n\n{content}"
+
+        # 引用ヘッダを見出し直後に挿入
+        cite = _build_citation_header(section, i + 1, total, source_name)
+        if cite:
+            first_nl = content.find("\n")
+            if first_nl >= 0:
+                content = content[:first_nl + 1] + "\n" + cite + content[first_nl + 1:]
+            else:
+                content = content + "\n\n" + cite
+
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
         summary = _extract_summary(content)
+
+        if _report_progress and _lock is not None:
+            with _lock:
+                _done[0] += 1
+                _cum_tok[0] += tok_counts[i]
+                cur, cum = _done[0], _cum_tok[0]
+            title_short = (section.get("title") or filename)[:40]
+            print(
+                f"  [{cur}/{total}] {title_short}"
+                f" — {tok_counts[i]:,}トークン（累計{cum:,}）",
+                file=sys.stderr,
+            )
+            _emit_progress("chunk", ch_i=cur, ch_n=total, tk_cum=cum)
+
         return (fpath, section.get("title", filename), summary)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -553,6 +847,7 @@ def _split_by_toc(markdown: str, toc: list[tuple[int, str, int]]) -> list[dict]:
                 "pos": match.start(),
                 "title": clean_title,
                 "level": level,
+                "page": page_num,
             })
             continue
 
@@ -566,6 +861,7 @@ def _split_by_toc(markdown: str, toc: list[tuple[int, str, int]]) -> list[dict]:
                 "pos": line_start,
                 "title": clean_title,
                 "level": level,
+                "page": page_num,
             })
 
     if not split_points:
@@ -592,7 +888,10 @@ def _split_by_toc(markdown: str, toc: list[tuple[int, str, int]]) -> list[dict]:
         end = split_points[i + 1]["pos"] if i + 1 < len(split_points) else total_len
         content = markdown[start:end].strip()
         if content:
-            sections.append({"title": sp["title"], "content": content})
+            sec: dict = {"title": sp["title"], "content": content}
+            if sp.get("page"):
+                sec["toc_page"] = sp["page"]
+            sections.append(sec)
 
     return sections
 
@@ -617,6 +916,7 @@ def _split_by_detected_headings(markdown: str, headings: list[dict]) -> list[dic
                 "pos": line_start,
                 "title": text,
                 "level": heading["level"],
+                "page": heading["page"] + 1,  # 0-indexed → 1-indexed
             })
 
     if not split_points:
@@ -643,7 +943,10 @@ def _split_by_detected_headings(markdown: str, headings: list[dict]) -> list[dic
         end = split_points[i + 1]["pos"] if i + 1 < len(split_points) else total_len
         content = markdown[start:end].strip()
         if content:
-            sections.append({"title": sp["title"], "content": content})
+            sec: dict = {"title": sp["title"], "content": content}
+            if sp.get("page"):
+                sec["toc_page"] = sp["page"]
+            sections.append(sec)
 
     return sections
 
@@ -674,6 +977,8 @@ def _split_by_pages(markdown: str, pages_per_section: int) -> list[dict]:
                 sections.append({
                     "title": f"Pages {group_start_page}-{page_num - 1}",
                     "content": content,
+                    "page_start": group_start_page,
+                    "page_end": page_num - 1,
                 })
             group_start = match.start()
             group_start_page = page_num
@@ -685,6 +990,8 @@ def _split_by_pages(markdown: str, pages_per_section: int) -> list[dict]:
         sections.append({
             "title": f"Pages {group_start_page}-{last_page}",
             "content": content,
+            "page_start": group_start_page,
+            "page_end": last_page,
         })
 
     return sections
@@ -695,7 +1002,10 @@ def _split_by_pages(markdown: str, pages_per_section: int) -> list[dict]:
 
 def split_sections(markdown: str) -> list[dict]:
     """
-    MarkdownをH1/H2境界で章分割する。
+    MarkdownをH1/H2境界で章分割し、BFS順（浅い階層優先）で返す。
+
+    BFS順: H1セクション全体 → H2セクション全体（同一階層内はドキュメント順を維持）。
+    これにより、トークン予算が限られている場合でも全体の概要を先に取得できる。
 
     Returns: [{"title": str, "content": str}]
     """
@@ -705,20 +1015,26 @@ def split_sections(markdown: str) -> list[dict]:
     if not matches:
         return [{"title": "", "content": markdown}]
 
-    sections = []
+    by_level: dict[int, list[dict]] = {}
     for i, match in enumerate(matches):
+        level = len(match.group(1))  # 1 = H1, 2 = H2
         start = match.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(markdown)
         title = match.group(2).strip()
         content = markdown[start:end].strip()
-        sections.append({"title": title, "content": content})
+        by_level.setdefault(level, []).append({"title": title, "content": content})
 
+    # BFS順: 浅い階層から結合
+    result: list[dict] = []
     if matches[0].start() > 0:
         preamble = markdown[:matches[0].start()].strip()
         if preamble:
-            sections.insert(0, {"title": "概要", "content": preamble})
+            result.append({"title": "概要", "content": preamble})
 
-    return sections
+    for level in sorted(by_level.keys()):
+        result.extend(by_level[level])
+
+    return result
 
 
 def merge_small_sections(
