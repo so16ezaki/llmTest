@@ -40,6 +40,9 @@ LIGHT: dict[str, str] = {
     "c_answer":  "#A6E3A1",
     "c_err":     "#F38BA8",
     "c_ok":      "#A6E3A1",
+    "c_thinking":    "#CBA6F7",
+    "c_tool_args":   "#94E2D5",
+    "c_tool_result": "#9399B2",
 }
 
 DARK: dict[str, str] = {
@@ -64,6 +67,9 @@ DARK: dict[str, str] = {
     "c_answer":  "#7EE787",
     "c_err":     "#FF7B72",
     "c_ok":      "#7EE787",
+    "c_thinking":    "#D2A8FF",
+    "c_tool_args":   "#7EE8CF",
+    "c_tool_result": "#8B949E",
 }
 
 C: dict[str, str] = dict(LIGHT)
@@ -287,9 +293,19 @@ class _Ghost(tk.Label):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class _Log(tk.Frame):
+    # tag_name → C パレットキー のマッピング
+    _TAG_COLOR_KEYS: dict[str, str] = {
+        "turn": "c_turn", "tool": "c_tool",
+        "answer": "c_answer", "err": "c_err", "ok": "c_ok",
+        "thinking": "c_thinking",
+        "tool_args": "c_tool_args",
+        "tool_result": "c_tool_result",
+    }
+
     def __init__(self, parent, **tag_colors: str):
         super().__init__(parent, bg=C["log_bg"])
         _tag(self, bg="log_bg")
+        self._tag_names = list(tag_colors.keys())
         self._txt = tk.Text(
             self, state="disabled", wrap="word",
             font=FONT_MONO, bg=C["log_bg"], fg=C["log_fg"],
@@ -317,6 +333,10 @@ class _Log(tk.Frame):
     def apply_theme(self):
         self.configure(bg=C["log_bg"])
         self._txt.configure(bg=C["log_bg"], fg=C["log_fg"])
+        for name in self._tag_names:
+            c_key = self._TAG_COLOR_KEYS.get(name)
+            if c_key and c_key in C:
+                self._txt.tag_config(name, foreground=C[c_key])
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -333,20 +353,56 @@ class _Writer(io.TextIOBase):
 
 
 class _StderrRouter(io.TextIOBase):
-    """agent.py の stderr をタグ付きでキューへ振り分ける。"""
+    """agent.py の stderr をタグ付きでキューへ振り分ける。
+
+    [thinking], [tool_args], [tool_result] は複数行にまたがるため、
+    プレフィックスで開始されたタグを次のプレフィックスが来るまで維持する。
+    """
+
+    # (prefix, tag, multi-line?) — 順序は優先度順
+    _RULES = (
+        ("[thinking]",    "thinking",    True),
+        ("[tool_args]",   "tool_args",   True),
+        ("[tool_result]", "tool_result", True),
+        ("[turn",         "turn",        False),
+        ("[compaction]",  "turn",        False),
+    )
+
     def __init__(self, q: queue.Queue):
         self._q = q
         self._buf = ""
+        self._multi_tag = ""   # 複数行タグの継続用
+
     def write(self, t: str) -> int:
         self._buf += t
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             line += "\n"
-            tag = "turn" if line.startswith("[turn") else \
-                  "tool" if line.strip().startswith("[") else ""
-            self._q.put((tag, line))
+            stripped = line.strip()
+
+            # ルールにマッチするかチェック
+            matched = False
+            for prefix, tag, multi in self._RULES:
+                if stripped.startswith(prefix):
+                    self._multi_tag = tag if multi else ""
+                    self._q.put((tag, line))
+                    matched = True
+                    break
+
+            if not matched:
+                if stripped.startswith("["):
+                    # 新しいプレフィックスが来たら複数行モードを終了
+                    self._multi_tag = ""
+                    self._q.put(("tool", line))
+                elif self._multi_tag:
+                    # 複数行タグの継続中
+                    self._q.put((self._multi_tag, line))
+                else:
+                    self._q.put(("", line))
         return len(t)
-    def flush(self): pass
+
+    def flush(self):
+        pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1121,7 +1177,10 @@ class AgentTab(ttk.Frame):
         # ── ログ ──
         self._log = _Log(self,
             turn=C["c_turn"], tool=C["c_tool"],
-            answer=C["c_answer"], err=C["c_err"])
+            answer=C["c_answer"], err=C["c_err"],
+            thinking=C["c_thinking"],
+            tool_args=C["c_tool_args"],
+            tool_result=C["c_tool_result"])
         self._log.pack(fill="both", expand=True, padx=20, pady=(4, 16))
 
     # ── スコープ管理 ──
