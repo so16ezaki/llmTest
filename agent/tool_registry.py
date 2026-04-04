@@ -275,8 +275,12 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                     "analysis": {
                         "type": "string",
-                        "description": "解析種別",
+                        "description": (
+                            "解析種別。コードプロジェクト解析では通常 'all' を使用して全種類を一括実行してください。"
+                            " 不要と判断した解析は除外できます。個別指定（'complexity' 等）は特定解析の再実行・深堀り専用です。"
+                        ),
                         "enum": [
+                            "all",
                             "call_graph",
                             "dependency_graph",
                             "data_flow",

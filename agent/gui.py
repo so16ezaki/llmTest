@@ -298,8 +298,7 @@ class _Log(tk.Frame):
         "turn": "c_turn", "tool": "c_tool",
         "answer": "c_answer", "err": "c_err", "ok": "c_ok",
         "thinking": "c_thinking",
-        "tool_args": "c_tool_args",
-        "tool_result": "c_tool_result",
+        "call_tool": "c_tool_args",
     }
 
     def __init__(self, parent, **tag_colors: str):
@@ -344,12 +343,26 @@ class _Log(tk.Frame):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class _Writer(io.TextIOBase):
-    def __init__(self, q: queue.Queue, tag: str = ""):
-        self._q, self._tag = q, tag
+    """stdout/stderr をキューへ転送しつつ、元のストリームにもエコーする。"""
+    def __init__(self, q: queue.Queue, tag: str = "",
+                 echo: "io.TextIOBase | None" = None):
+        self._q, self._tag, self._echo = q, tag, echo
     def write(self, t: str) -> int:
-        if t: self._q.put((self._tag, t))
+        if t:
+            self._q.put((self._tag, t))
+            if self._echo:
+                try:
+                    self._echo.write(t)
+                    self._echo.flush()
+                except Exception:
+                    pass
         return len(t)
-    def flush(self): pass
+    def flush(self):
+        if self._echo:
+            try:
+                self._echo.flush()
+            except Exception:
+                pass
 
 
 class _StderrRouter(io.TextIOBase):
@@ -361,11 +374,10 @@ class _StderrRouter(io.TextIOBase):
 
     # (prefix, tag, multi-line?) — 順序は優先度順
     _RULES = (
-        ("[thinking]",    "thinking",    True),
-        ("[tool_args]",   "tool_args",   True),
-        ("[tool_result]", "tool_result", True),
-        ("[turn",         "turn",        False),
-        ("[compaction]",  "turn",        False),
+        ("[thinking]",   "thinking",  True),
+        ("[call Tool ",  "call_tool", False),
+        ("[turn",        "turn",      False),
+        ("[compaction]", "turn",      False),
     )
 
     def __init__(self, q: queue.Queue):
@@ -521,12 +533,11 @@ class KnowledgeTab(ttk.Frame):
         try:
             p = self._path
             name = self._name_var.get().strip() or None
-            llm  = self._llm_var.get()
             if os.path.isdir(p):
                 for f in k2s._collect_files(p):
-                    k2s._process_file(f, doc_name=None, use_llm=llm)
+                    k2s._process_file(f, doc_name=None)
             else:
-                k2s._process_file(p, doc_name=name, use_llm=llm)
+                k2s._process_file(p, doc_name=name)
             self._q.put(("ok", "=== 完了 ===\n"))
         except Exception as e:
             self._q.put(("err", f"[error] {e}\n"))
@@ -556,6 +567,154 @@ class KnowledgeTab(ttk.Frame):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  タブ2 — ナレッジ管理
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ── 進捗状態を保持するデータクラス（tkinter不要・テスト可能） ──
+# NOTE: IngestBarState / apply_progress_event / apply_progress_line は
+#       test_progress.py から参照されるため、クラス・関数としては残す。
+#       GUI側の進捗表示はログ欄（ターミナル出力のエコー）に一本化された。
+
+class IngestBarState:
+    """進捗バーの論理状態。tkinter非依存でテスト可能。"""
+    __slots__ = (
+        "prog_ch_mode", "prog_ch_max", "prog_ch_val", "prog_ch_txt",
+        "prog_tk_mode", "prog_tk_max", "prog_tk_val", "prog_tk_txt",
+        "hier_txt", "bars_initialized",
+    )
+
+    def __init__(self):
+        self.prog_ch_mode = "indeterminate"
+        self.prog_ch_max  = 100
+        self.prog_ch_val  = 0
+        self.prog_ch_txt  = "読み込み中..."
+        self.prog_tk_mode = "indeterminate"
+        self.prog_tk_max  = 100
+        self.prog_tk_val  = 0
+        self.prog_tk_txt  = "計算中..."
+        self.hier_txt     = "読み込み中..."
+        self.bars_initialized = False
+
+
+_RE_INGEST_INIT  = re.compile(r"(?:階層並列処理|セクション処理): (\d+)章.*予算([\d,]+)トークン")
+_RE_INGEST_CH    = re.compile(r"\[(\d+)/(\d+)\].*累計([\d,]+)")
+_RE_INGEST_LIMIT = re.compile(r"トークン予算超過")
+_RE_INGEST_STEP  = re.compile(r"\[(\d)/4\]")
+_RE_INGEST_PDF   = re.compile(r"PDF変換:.*\((\d+)/(\d+)チャンク\)")
+_INGEST_STEP_LABEL = {1: "読み込み中...", 2: "分割中...", 3: "構造化中...", 4: "書き出し中..."}
+
+
+def apply_progress_event(state: "IngestBarState", event: dict) -> None:
+    """
+    __progress__ イベント辞書を受け取り、IngestBarState を更新する。
+    tkinter に依存しないため単体テスト可能。
+    """
+    ev = event.get("event", "")
+    if ev == "init":
+        ch_n = int(event.get("ch_n", 1))
+        tk_n = int(event.get("tk_n", 1))
+        state.prog_ch_mode = "determinate"
+        state.prog_ch_max  = max(ch_n, 1)
+        state.prog_ch_val  = 0
+        state.prog_ch_txt  = f"0% (0/{ch_n})"
+        state.prog_tk_mode = "determinate"
+        state.prog_tk_max  = max(tk_n, 1)
+        state.prog_tk_val  = 0
+        state.prog_tk_txt  = f"0/{tk_n:,} トークン"
+        state.hier_txt     = "処理開始..."
+        state.bars_initialized = True
+
+    elif ev == "chunk":
+        ch_i   = int(event.get("ch_i", 0))
+        ch_n   = int(event.get("ch_n", 1))
+        tk_cum = int(event.get("tk_cum", 0))
+        if not state.bars_initialized:
+            state.prog_ch_mode = "determinate"
+            state.prog_ch_max  = max(ch_n, 1)
+            state.bars_initialized = True
+        pct = ch_i * 100 // max(ch_n, 1)
+        state.prog_ch_val = ch_i
+        state.prog_ch_txt = f"{pct}% ({ch_i}/{ch_n})"
+        if state.prog_tk_mode == "determinate":
+            tk_max = state.prog_tk_max
+            state.prog_tk_val = min(tk_cum, tk_max)
+            state.prog_tk_txt = f"{tk_cum:,}/{tk_max:,} トークン"
+        else:
+            state.prog_tk_txt = f"{tk_cum:,}/-- トークン"
+        level = event.get("level", "")
+        title = event.get("title", "")
+        if level and title:
+            state.hier_txt = f"Lv{level}: {title}"
+        elif title:
+            state.hier_txt = str(title)
+
+
+def apply_progress_line(state: "IngestBarState", line: str) -> None:
+    """
+    stderr テキスト1行を受け取り、IngestBarState を更新する。
+    tkinter に依存しないため単体テスト可能。
+    """
+    line = line.strip()
+    if not line:
+        return
+
+    m = _RE_INGEST_INIT.search(line)
+    if m:
+        ch_n = int(m.group(1))
+        tk_n = int(m.group(2).replace(",", ""))
+        state.prog_ch_mode = "determinate"
+        state.prog_ch_max  = max(ch_n, 1)
+        state.prog_ch_val  = 0
+        state.prog_ch_txt  = f"0% (0/{ch_n})"
+        state.prog_tk_mode = "determinate"
+        state.prog_tk_max  = max(tk_n, 1)
+        state.prog_tk_val  = 0
+        state.prog_tk_txt  = f"0/{tk_n:,} トークン"
+        state.hier_txt     = "処理開始..."
+        state.bars_initialized = True
+        return
+
+    m = _RE_INGEST_CH.search(line)
+    if m:
+        ch_i   = int(m.group(1))
+        ch_n   = int(m.group(2))
+        tk_cum = int(m.group(3).replace(",", ""))
+        if not state.bars_initialized:
+            state.prog_ch_mode = "determinate"
+            state.prog_ch_max  = max(ch_n, 1)
+            state.bars_initialized = True
+        pct = ch_i * 100 // max(ch_n, 1)
+        state.prog_ch_val = ch_i
+        state.prog_ch_txt = f"{pct}% ({ch_i}/{ch_n})"
+        if state.prog_tk_mode == "determinate":
+            tk_max = state.prog_tk_max
+            state.prog_tk_val = min(tk_cum, tk_max)
+            state.prog_tk_txt = f"{tk_cum:,}/{tk_max:,} トークン"
+        else:
+            state.prog_tk_txt = f"{tk_cum:,}/... トークン"
+        state.hier_txt = line[:80]
+        return
+
+    if _RE_INGEST_LIMIT.search(line):
+        state.prog_tk_val = state.prog_tk_max
+        state.prog_tk_txt = f"{state.prog_tk_max:,}/{state.prog_tk_max:,} トークン"
+        return
+
+    mp = _RE_INGEST_PDF.search(line)
+    if mp and not state.bars_initialized:
+        c_i = int(mp.group(1))
+        c_n = int(mp.group(2))
+        pct = c_i * 100 // max(c_n, 1)
+        state.prog_ch_txt = f"{pct}% ({c_i}/{c_n} チャンク)"
+        state.prog_tk_txt = "読み込み中..."
+        state.hier_txt    = "PDF変換中..."
+        return
+
+    ms = _RE_INGEST_STEP.search(line)
+    if ms and not state.bars_initialized:
+        step  = int(ms.group(1))
+        label = _INGEST_STEP_LABEL.get(step, "処理中...")
+        state.prog_ch_txt = label
+        state.prog_tk_txt = label
+        state.hier_txt    = label
 
 class KnowledgeManagerTab(ttk.Frame):
     def __init__(self, parent):
@@ -592,7 +751,21 @@ class KnowledgeManagerTab(ttk.Frame):
         self._ing_llm = tk.BooleanVar()
         ttk.Checkbutton(ing_row, text="LLM", variable=self._ing_llm).pack(side="left")
 
-        # 選択パス + 進捗ラベル（1行）
+        self._ing_force = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ing_row, text="再処理", variable=self._ing_force).pack(side="left", padx=(6, 0))
+
+        # 2行目: トークン上限
+        ing_row2 = _fr(self)
+        ing_row2.pack(fill="x", padx=20, pady=(4, 0))
+        _lb(ing_row2, "トークン上限", fg="muted", font=FONT_SM).pack(side="left")
+        from config import KNOWLEDGE_MAX_TOKENS as _default_mt
+        self._ing_max_tokens = tk.StringVar(
+            value=f"{_default_mt:,}" if _default_mt else "0")
+        ttk.Entry(ing_row2, textvariable=self._ing_max_tokens, width=10).pack(
+            side="left", padx=(6, 4))
+        _lb(ing_row2, "(0 = 無制限)", fg="muted", font=FONT_SM).pack(side="left")
+
+        # 選択パス（1行）
         self._ing_path = ""
         self._ing_status = tk.StringVar(value="ファイルまたはフォルダを選択してください")
         status_lbl = _tag(
@@ -602,31 +775,27 @@ class KnowledgeManagerTab(ttk.Frame):
             bg="bg", fg="muted")
         status_lbl.pack(fill="x", padx=20, pady=(4, 0))
 
-        # ── 進捗バー（ナレッジ化処理中のみ表示） ──
-        self._prog_area = _fr(self)
-        self._prog_area.pack(fill="x", padx=20, pady=(2, 0))
+        # ── ログ出力欄（ターミナル出力をそのまま表示） ──
+        log_frame = _fr(self, bg="border")
+        log_frame.pack(fill="x", padx=20, pady=(4, 0))
+        log_inner = _fr(log_frame, bg="surface")
+        log_inner.pack(fill="both", expand=False, padx=1, pady=1)
 
-        # 章進捗行（処理開始時に pack する）
-        self._ch_row = _fr(self._prog_area)
-        _lb(self._ch_row, "章:", fg="muted", font=FONT_SM).pack(side="left", padx=(0, 4))
-        self._prog_ch = ttk.Progressbar(self._ch_row, length=280, mode="determinate")
-        self._prog_ch.pack(side="left")
-        self._prog_ch_txt = tk.StringVar(value="")
-        _ch_txt_lbl = tk.Label(self._ch_row, textvariable=self._prog_ch_txt,
-                               bg=C["bg"], fg=C["muted"], font=FONT_SM)
-        _ch_txt_lbl.pack(side="left", padx=(6, 0))
-        _tag(_ch_txt_lbl, bg="bg", fg="muted")
+        self._ing_log = tk.Text(
+            log_inner, height=8, wrap="word",
+            bg=C["surface"], fg=C["text"], font=FONT_MONO,
+            relief="flat", borderwidth=0,
+            state="disabled",            # 読み取り専用
+            insertwidth=0,
+        )
+        _scrollbar = ttk.Scrollbar(log_inner, orient="vertical",
+                                   command=self._ing_log.yview)
+        self._ing_log.configure(yscrollcommand=_scrollbar.set)
+        self._ing_log.pack(side="left", fill="both", expand=True)
+        _scrollbar.pack(side="right", fill="y")
 
-        # トークン進捗行（処理開始時に pack する）
-        self._tk_row = _fr(self._prog_area)
-        _lb(self._tk_row, "トークン:", fg="muted", font=FONT_SM).pack(side="left", padx=(0, 4))
-        self._prog_tk = ttk.Progressbar(self._tk_row, length=280, mode="determinate")
-        self._prog_tk.pack(side="left")
-        self._prog_tk_txt = tk.StringVar(value="")
-        _tk_txt_lbl = tk.Label(self._tk_row, textvariable=self._prog_tk_txt,
-                               bg=C["bg"], fg=C["muted"], font=FONT_SM)
-        _tk_txt_lbl.pack(side="left", padx=(6, 0))
-        _tag(_tk_txt_lbl, bg="bg", fg="muted")
+        # タグ設定（stderr は赤系で表示）
+        self._ing_log.tag_configure("err", foreground="#e06060")
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=20, pady=12)
 
@@ -705,178 +874,107 @@ class KnowledgeManagerTab(ttk.Frame):
             self._ing_status.set(p)
 
     def _ingest_run(self):
-        if self._ingest_running: return
+        if self._ingest_running:
+            return
         if not self._ing_path:
             messagebox.showwarning("未選択", "ファイルまたはフォルダを選択してください。")
             return
         self._ingest_running = True
-        self._bars_initialized = False   # init行受信前はFalse
         self._ing_run_btn.enable(False)
-        # 進捗バーをリセットして indeterminate モードで表示（init行が来るまで）
-        self._prog_ch.stop()
-        self._prog_ch.configure(mode="indeterminate", maximum=100)
-        self._prog_ch_txt.set("読み込み中...")
-        self._prog_tk.stop()
-        self._prog_tk.configure(mode="indeterminate", maximum=100)
-        self._prog_tk_txt.set("計算中...")
-        self._ch_row.pack(fill="x", pady=(2, 1))
-        self._tk_row.pack(fill="x", pady=(1, 4))
-        self._prog_ch.start(50)
-        self._prog_tk.start(50)
-        # 即時フィードバック
-        self._ing_status.set("解析中...")
-        threading.Thread(target=self._ingest_work, daemon=True).start()
+        # ログ欄をクリア
+        self._ing_log.configure(state="normal")
+        self._ing_log.delete("1.0", "end")
+        self._ing_log.configure(state="disabled")
+        self._ing_status.set("処理中...")
+        # メインスレッドで tkinter 変数を読み取り（スレッド安全性）
+        args = {
+            "path": self._ing_path,
+            "name": self._ing_name.get().strip() or None,
+        }
+        threading.Thread(target=self._ingest_work, args=(args,), daemon=True).start()
 
-    def _ingest_work(self):
-        import knowledge_to_skills as k2s
+    def _ingest_work(self, args: dict):
         old_out, old_err = sys.stdout, sys.stderr
-        sys.stdout = _Writer(self._ingest_q)
-        sys.stderr = _Writer(self._ingest_q, "err")
-        k2s._on_progress = lambda ev, **kw: self._ingest_q.put(("__progress__", {"event": ev, **kw}))
         try:
-            p    = self._ing_path
-            name = self._ing_name.get().strip() or None
-            llm  = self._ing_llm.get()
+            import knowledge_to_skills as k2s
+        except Exception as e:
+            old_err.write(f"[ingest] インポートエラー: {e}\n")
+            self._ingest_q.put(("err", f"インポートエラー: {e}\n"))
+            self._ingest_q.put(("__done__", ""))
+            return
+        # stdout/stderr をキュー転送しつつターミナルにもエコー
+        sys.stdout = _Writer(self._ingest_q, "",    echo=old_out)
+        sys.stderr = _Writer(self._ingest_q, "err", echo=old_err)
+        k2s._on_progress = None   # GUI専用コールバックは使わない
+        try:
+            p    = args["path"]
+            name = args["name"]
+            print(f"[ingest] path={p}", file=sys.stderr)
             if os.path.isdir(p):
                 for f in k2s._collect_files(p):
-                    k2s._process_file(f, doc_name=None, use_llm=llm)
+                    k2s._process_file(f, doc_name=None)
             else:
-                k2s._process_file(p, doc_name=name, use_llm=llm)
-            self._ingest_q.put(("ok", "完了"))
+                k2s._process_file(p, doc_name=name)
         except Exception as e:
-            self._ingest_q.put(("err", f"エラー: {e}"))
+            import traceback
+            traceback.print_exc()  # stderr 経由でキュー＋ターミナル
         finally:
             k2s._on_progress = None
             sys.stdout, sys.stderr = old_out, old_err
             self._ingest_q.put(("__done__", ""))
 
-    # 進捗解析用の正規表現（コンパイル済み）
-    # _RE_INIT: PDF階層処理（BFS）と通常処理の両方に対応
-    _RE_INIT  = re.compile(r"(?:階層並列処理|セクション処理): (\d+)章.*予算([\d,]+)トークン")
-    _RE_CH    = re.compile(r"\[(\d+)/(\d+)\].*累計([\d,]+)")
-    _RE_LIMIT = re.compile(r"トークン予算超過")
-    # [1/4] 等のステップ行（セクション処理前の読み込み・分割ステップ）
-    _RE_STEP  = re.compile(r"\[(\d)/4\]")
-    _STEP_LABEL = {1: "読み込み中...", 2: "分割中...", 3: "構造化中...", 4: "書き出し中..."}
-    # PDF並列変換の進捗行（readers/pdf.py の _print_progress）
-    _RE_PDF   = re.compile(r"PDF変換:.*\((\d+)/(\d+)チャンク\)")
+    def _log_append(self, text: str, tag: str = ""):
+        """ログ欄にテキストを追記し、末尾にスクロールする。
+
+        \\r で始まるテキストは最終行を上書きする（ターミナルの動作を再現）。
+        """
+        self._ing_log.configure(state="normal")
+        # \r 処理: 最終行を上書き
+        if "\r" in text:
+            # 最後の \r 以降だけを表示（上書き動作）
+            parts = text.rsplit("\r", 1)
+            content = parts[-1]
+            if content:
+                # 現在の最終行を削除して置き換え
+                self._ing_log.delete("end-1c linestart", "end-1c")
+                if tag:
+                    self._ing_log.insert("end", content, tag)
+                else:
+                    self._ing_log.insert("end", content)
+        else:
+            if tag:
+                self._ing_log.insert("end", text, tag)
+            else:
+                self._ing_log.insert("end", text)
+        self._ing_log.see("end")
+        self._ing_log.configure(state="disabled")
 
     def _ingest_poll(self):
         try:
             while True:
                 tag, text = self._ingest_q.get_nowait()
+
                 if tag == "__done__":
                     self._ingest_running = False
                     self._ing_run_btn.enable(True)
-                    self._prog_ch.stop()
-                    self._prog_tk.stop()
-                    self._ch_row.pack_forget()
-                    self._tk_row.pack_forget()
+                    self._log_append("--- 完了 ---\n")
+                    self._ing_status.set("完了")
                     self.refresh()
                     continue
-                if tag == "__progress__":
-                    d = text  # dict passed directly
-                    ev = d.get("event", "")
-                    if ev == "init":
-                        ch_n = int(d.get("ch_n", 1))
-                        tk_n = int(d.get("tk_n", 1))
-                        self._prog_ch.stop()
-                        self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
-                        self._prog_ch["value"] = 0
-                        self._prog_ch_txt.set(f"0/{ch_n} 章")
-                        self._prog_tk.stop()
-                        self._prog_tk.configure(mode="determinate", maximum=max(tk_n, 1))
-                        self._prog_tk["value"] = 0
-                        self._prog_tk_txt.set(f"0/{tk_n:,} トークン")
-                        self._ing_status.set(f"処理中... ({ch_n}章 / 予算{tk_n:,}トークン)")
-                        self._bars_initialized = True
-                    elif ev == "chunk":
-                        ch_i   = int(d.get("ch_i", 0))
-                        ch_n   = int(d.get("ch_n", 1))
-                        tk_cum = int(d.get("tk_cum", 0))
-                        if not self._bars_initialized:
-                            self._prog_ch.stop()
-                            self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
-                            self._bars_initialized = True
-                        tk_max = int(self._prog_tk["maximum"])
-                        self._prog_ch["value"] = ch_i
-                        self._prog_ch_txt.set(f"{ch_i}/{ch_n} 章")
-                        if self._prog_tk["mode"] == "determinate":
-                            self._prog_tk["value"] = min(tk_cum, tk_max)
-                            self._prog_tk_txt.set(f"{tk_cum:,}/{tk_max:,} トークン")
-                        else:
-                            self._prog_tk_txt.set(f"{tk_cum:,}/-- トークン")
-                    continue
-                line = text.strip()
-                if not line:
-                    continue
-                # init行: 章数・トークン予算を取得して determinate に切り替え
-                m = self._RE_INIT.search(line)
-                if m:
-                    ch_n = int(m.group(1))
-                    tk_n = int(m.group(2).replace(",", ""))
-                    self._prog_ch.stop()
-                    self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
-                    self._prog_ch["value"] = 0
-                    self._prog_ch_txt.set(f"0/{ch_n} 章")
-                    self._prog_tk.stop()
-                    self._prog_tk.configure(mode="determinate", maximum=max(tk_n, 1))
-                    self._prog_tk["value"] = 0
-                    self._prog_tk_txt.set(f"0/{tk_n:,} トークン")
-                    self._ing_status.set(f"処理中... ({ch_n}章 / 予算{tk_n:,}トークン)")
-                    self._bars_initialized = True
-                    continue
-                # 章完了行: [i/N] ... 累計T
-                m = self._RE_CH.search(line)
-                if m:
-                    ch_i   = int(m.group(1))
-                    ch_n   = int(m.group(2))
-                    tk_cum = int(m.group(3).replace(",", ""))
-                    # init行が来る前にチャンク行が届いた場合
-                    # → 章バーだけ determinate に切り替え、tokenバーは init 待ち
-                    if not self._bars_initialized:
-                        self._prog_ch.stop()
-                        self._prog_ch.configure(mode="determinate", maximum=max(ch_n, 1))
-                        self._bars_initialized = True
-                    tk_max = int(self._prog_tk["maximum"])
-                    self._prog_ch["value"] = ch_i
-                    self._prog_ch_txt.set(f"{ch_i}/{ch_n} 章")
-                    # token バーが determinate になっている場合のみ value を更新
-                    if self._prog_tk["mode"] == "determinate":
-                        self._prog_tk["value"] = min(tk_cum, tk_max)
-                        self._prog_tk_txt.set(f"{tk_cum:,}/{tk_max:,} トークン")
-                    else:
-                        self._prog_tk_txt.set(f"{tk_cum:,}/... トークン")
-                    self._ing_status.set(line[:100])
-                    continue
-                # トークン予算超過
-                if self._RE_LIMIT.search(line):
-                    tk_max = int(self._prog_tk["maximum"])
-                    self._prog_tk["value"] = tk_max
-                    self._prog_tk_txt.set(f"{tk_max:,}/{tk_max:,} トークン")
-                    self._ing_status.set("トークン上限到達 — セクション境界で停止中...")
-                    continue
-                # PDF並列変換の進捗行: チャンク単位で両ラベルを更新
-                mp = self._RE_PDF.search(line)
-                if mp and not self._bars_initialized:
-                    c_i = int(mp.group(1))
-                    c_n = int(mp.group(2))
-                    pct = c_i * 100 // max(c_n, 1)
-                    self._prog_ch_txt.set(f"PDF変換中... {pct}%（{c_i}/{c_n}）")
-                    self._prog_tk_txt.set("読み込み中...")
-                    self._ing_status.set(line[:100])
-                    continue
-                # [N/4] ステップ行: indeterminate 中に意味のあるテキストを表示
-                ms = self._RE_STEP.search(line)
-                if ms and not self._bars_initialized:
-                    step = int(ms.group(1))
-                    label = self._STEP_LABEL.get(step, "処理中...")
-                    self._prog_ch_txt.set(label)
-                    self._prog_tk_txt.set(label)
-                self._ing_status.set(line[:100])
+
+                # stdout / stderr テキストをログ欄に追記
+                if text:
+                    self._log_append(text, tag)
+
         except queue.Empty:
             pass
-        self.after(100, self._ingest_poll)
+        except Exception as e:
+            import traceback
+            print(f"[ingest:poll] 例外: {e}", file=sys.__stderr__)
+            traceback.print_exc(file=sys.__stderr__)
+            self._ing_status.set(f"[進捗エラー] {e}")
+        finally:
+            self.after(100, self._ingest_poll)
 
     # ── データ ──
 
@@ -970,67 +1068,6 @@ class KnowledgeManagerTab(ttk.Frame):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  セッションナレッジ コンテキストビルダー
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def _build_session_context(paths: list[str]) -> str:
-    """
-    指定パス（ファイルまたはディレクトリ）を読み込み、
-    システムプロンプトに注入するコンテキスト文字列を返す。
-    ディレクトリの場合は配下のファイルを再帰的に処理する。
-    """
-    if not paths:
-        return ""
-
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    try:
-        from readers import read_file as _read_file
-    except ImportError:
-        return ""
-
-    MAX_BYTES = 300_000  # コンテキスト肥大化を防ぐ上限
-
-    def _collect_files(p: str) -> list[str]:
-        if os.path.isfile(p):
-            return [p]
-        result = []
-        for root, _dirs, files in os.walk(p):
-            for f in sorted(files):
-                result.append(os.path.join(root, f))
-        return result
-
-    sections: list[str] = []
-    total = 0
-
-    for base in paths:
-        for filepath in _collect_files(base):
-            if total >= MAX_BYTES:
-                sections.append("...[セッションナレッジの上限に達したため残りは省略されました]")
-                break
-            try:
-                content = _read_file(filepath)
-                chunk = (
-                    f"### {filepath}\n\n"
-                    f"{content}\n"
-                )
-                sections.append(chunk)
-                total += len(chunk.encode("utf-8"))
-            except Exception as e:
-                sections.append(f"### {filepath}\n\n[読み込みエラー: {e}]\n")
-        else:
-            continue
-        break
-
-    if not sections:
-        return ""
-
-    return (
-        "## セッションナレッジ（このセッション限りの参照ドキュメント）\n\n"
-        + "\n".join(sections)
-    )
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  タブ3 — エージェント
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1039,8 +1076,7 @@ class AgentTab(ttk.Frame):
         super().__init__(parent)
         self._running = False
         self._q: queue.Queue = queue.Queue()
-        self._paths: list[str] = []          # サンドボックス許可パス
-        self._session_docs: list[str] = []   # セッションナレッジパス
+        self._paths: list[tuple[str, str]] = []  # (path, "ro"|"rw")
         _tag(self, background="bg")
         self._build()
         self._poll()
@@ -1049,16 +1085,20 @@ class AgentTab(ttk.Frame):
         P = dict(padx=20, pady=0)
 
         # ── スコープ ──
-        _sect(self, "作業スコープ  —  読み書きを許可するファイル / フォルダ").pack(
+        _sect(self, "作業スコープ  —  アクセスを許可するファイル / フォルダ").pack(
             fill="x", padx=20, pady=(16, 8))
 
         sc_bar = _fr(self)
         sc_bar.pack(fill="x", **P)
-        _Btn(sc_bar, "ファイル追加…", self._add_file,
-             px=12, py=6).set_cmd(self._add_file).pack(side="left", padx=(0, 8))
-        _Btn(sc_bar, "フォルダ追加…", self._add_dir, role="neutral",
-             px=12, py=6).set_cmd(self._add_dir).pack(side="left")
-        _Btn(sc_bar, "リセット", self._clr_scope, role="danger",
+        _Btn(sc_bar, "ファイル（読）", None,
+             px=12, py=6).set_cmd(lambda: self._add_file("ro")).pack(side="left", padx=(0, 4))
+        _Btn(sc_bar, "ファイル（読書）", None, role="neutral",
+             px=12, py=6).set_cmd(lambda: self._add_file("rw")).pack(side="left", padx=(0, 8))
+        _Btn(sc_bar, "フォルダ（読）", None,
+             px=12, py=6).set_cmd(lambda: self._add_dir("ro")).pack(side="left", padx=(0, 4))
+        _Btn(sc_bar, "フォルダ（読書）", None, role="neutral",
+             px=12, py=6).set_cmd(lambda: self._add_dir("rw")).pack(side="left")
+        _Btn(sc_bar, "リセット", None, role="danger",
              px=12, py=6).set_cmd(self._clr_scope).pack(side="right")
 
         sc_box, sc_inner = _input_frame(self)
@@ -1077,52 +1117,43 @@ class AgentTab(ttk.Frame):
         self._scope_lb.pack(side="left", fill="x", expand=True)
         sb.pack(side="right", fill="y")
 
-        _lb(self, "skills/  と  project_memory.md  は常に許可",
+        _lb(self, "[R] 読み取り専用  [RW] 読み書き  |  skills/  と  project_memory.md  は常に許可",
             fg="muted", font=("Yu Gothic UI", 8)
             ).pack(anchor="w", padx=20, pady=(4, 0))
 
         ttk.Separator(self, orient="horizontal").pack(
             fill="x", padx=20, pady=14)
 
-        # ── セッションナレッジ ──
-        sn_hdr = _fr(self)
-        sn_hdr.pack(fill="x", padx=20, pady=(0, 6))
-        _sect(sn_hdr, "セッションナレッジ  —  このセッション限りのコンテキスト").pack(
-            side="left")
-        self._sn_tok_var = tk.StringVar(value="")
-        _tag(tk.Label(sn_hdr, textvariable=self._sn_tok_var,
-                      bg=C["bg"], fg=C["muted"], font=FONT_SM
-                      ).pack(side="right"), bg="bg", fg="muted")
+        # ── コンテキスト長設定 ──
+        _sect(self, "コンテキスト長  —  モデルの最大トークン数に合わせて設定").pack(
+            fill="x", padx=20, pady=(0, 8))
 
-        sn_bar = _fr(self)
-        sn_bar.pack(fill="x", padx=20)
-        _Btn(sn_bar, "ファイル追加…", self._sn_add_file,
-             px=12, py=6).set_cmd(self._sn_add_file).pack(side="left", padx=(0, 8))
-        _Btn(sn_bar, "フォルダ追加…", self._sn_add_dir, role="neutral",
-             px=12, py=6).set_cmd(self._sn_add_dir).pack(side="left")
-        _Ghost(sn_bar, "クリア", self._sn_clear).pack(side="right")
+        ctx_bar = _fr(self)
+        ctx_bar.pack(fill="x", padx=20)
 
-        sn_box, sn_inner = _input_frame(self)
-        sn_box.pack(fill="x", padx=20, pady=(8, 0))
-        self._sn_lb = tk.Listbox(
-            sn_inner, height=3, font=FONT_MONO,
-            bg=C["input"], fg=C["text"],
-            selectbackground=C["sel_bg"], selectforeground=C["sel_fg"],
-            borderwidth=0, highlightthickness=0, activestyle="none",
-            state="disabled")
-        _tag(self._sn_lb, bg="input", fg="text",
-             selectbackground="sel_bg", selectforeground="sel_fg")
-        sn_sb = ttk.Scrollbar(sn_inner, orient="vertical",
-                              command=self._sn_lb.yview)
-        self._sn_lb.configure(yscrollcommand=sn_sb.set)
-        self._sn_lb.pack(side="left", fill="x", expand=True)
-        sn_sb.pack(side="right", fill="y")
+        _tag(tk.Label(ctx_bar, text="コンテキスト長:", bg=C["bg"],
+                      fg=C["text"], font=FONT_SM), bg="bg", fg="text"
+             ).pack(side="left")
 
-        _lb(self, "選択中の行を Delete キーで削除",
-            fg="muted", font=("Yu Gothic UI", 8)
-            ).pack(anchor="w", padx=20, pady=(4, 0))
-        self._sn_lb.bind("<Delete>", self._sn_remove_selected)
-        self._sn_lb.bind("<BackSpace>", self._sn_remove_selected)
+        from config import CONTEXT_LIMIT as _default_ctx
+        self._ctx_var = tk.StringVar(value=str(_default_ctx))
+        ctx_entry = tk.Entry(
+            ctx_bar, textvariable=self._ctx_var, width=10,
+            font=FONT_MONO, bg=C["input"], fg=C["text"],
+            insertbackground=C["text"], relief="flat",
+            borderwidth=1, highlightthickness=1)
+        _tag(ctx_entry, bg="input", fg="text", insertbackground="text")
+        ctx_entry.pack(side="left", padx=(8, 4))
+        _tag(tk.Label(ctx_bar, text="tokens", bg=C["bg"],
+                      fg=C["muted"], font=FONT_SM), bg="bg", fg="muted"
+             ).pack(side="left")
+
+        # プリセットボタン
+        for label, val in [("4K", "4096"), ("8K", "8192"),
+                           ("32K", "32768"), ("60K", "60000")]:
+            _Ghost(ctx_bar, label,
+                   lambda v=val: self._ctx_var.set(v)
+                   ).pack(side="left", padx=(6, 0))
 
         ttk.Separator(self, orient="horizontal").pack(
             fill="x", padx=20, pady=14)
@@ -1179,25 +1210,25 @@ class AgentTab(ttk.Frame):
             turn=C["c_turn"], tool=C["c_tool"],
             answer=C["c_answer"], err=C["c_err"],
             thinking=C["c_thinking"],
-            tool_args=C["c_tool_args"],
-            tool_result=C["c_tool_result"])
+            call_tool=C["c_tool_args"])
         self._log.pack(fill="both", expand=True, padx=20, pady=(4, 16))
 
     # ── スコープ管理 ──
 
-    def _add_file(self):
+    def _add_file(self, mode: str):
         p = filedialog.askopenfilename(title="許可するファイルを選択")
-        if p: self._add_scope(p)
+        if p: self._add_scope(p, mode)
 
-    def _add_dir(self):
+    def _add_dir(self, mode: str):
         p = filedialog.askdirectory(title="許可するフォルダを選択")
-        if p: self._add_scope(p)
+        if p: self._add_scope(p, mode)
 
-    def _add_scope(self, p):
-        if p not in self._paths:
-            self._paths.append(p)
+    def _add_scope(self, p: str, mode: str):
+        if not any(existing == p for existing, _ in self._paths):
+            self._paths.append((p, mode))
+            label = f"[{'RW' if mode == 'rw' else 'R '}]  {p}"
             self._scope_lb.configure(state="normal")
-            self._scope_lb.insert("end", p)
+            self._scope_lb.insert("end", label)
             self._scope_lb.configure(state="disabled")
 
     def _clr_scope(self):
@@ -1205,72 +1236,6 @@ class AgentTab(ttk.Frame):
         self._scope_lb.configure(state="normal")
         self._scope_lb.delete(0, "end")
         self._scope_lb.configure(state="disabled")
-
-    # ── セッションナレッジ管理 ──
-
-    def _sn_add_file(self):
-        p = filedialog.askopenfilename(title="ナレッジとして追加するファイルを選択")
-        if p:
-            self._sn_add(p)
-
-    def _sn_add_dir(self):
-        p = filedialog.askdirectory(title="ナレッジとして追加するフォルダを選択")
-        if p:
-            self._sn_add(p)
-
-    def _sn_add(self, p: str):
-        if p not in self._session_docs:
-            self._session_docs.append(p)
-            display = os.path.basename(p) if os.path.isdir(p) else p
-            self._sn_lb.configure(state="normal")
-            self._sn_lb.insert("end", display)
-            self._sn_lb.configure(state="disabled")
-            self._sn_update_tokens()
-
-    def _sn_clear(self):
-        self._session_docs.clear()
-        self._sn_lb.configure(state="normal")
-        self._sn_lb.delete(0, "end")
-        self._sn_lb.configure(state="disabled")
-        self._sn_tok_var.set("")
-
-    def _sn_remove_selected(self, _event=None):
-        sel = self._sn_lb.curselection()
-        if not sel:
-            return
-        for i in reversed(sel):
-            self._sn_lb.configure(state="normal")
-            self._sn_lb.delete(i)
-            self._sn_lb.configure(state="disabled")
-            if i < len(self._session_docs):
-                self._session_docs.pop(i)
-        self._sn_update_tokens()
-
-    def _sn_update_tokens(self):
-        """追加済みドキュメントの概算トークン数をラベルに反映する。"""
-        if not self._session_docs:
-            self._sn_tok_var.set("")
-            return
-        total_chars = 0
-        for p in self._session_docs:
-            try:
-                if os.path.isfile(p):
-                    total_chars += os.path.getsize(p)
-                elif os.path.isdir(p):
-                    for root, _, files in os.walk(p):
-                        for f in files:
-                            try:
-                                total_chars += os.path.getsize(os.path.join(root, f))
-                            except OSError:
-                                pass
-            except OSError:
-                pass
-        approx_tokens = total_chars // 4
-        if approx_tokens >= 1000:
-            label = f"≈ {approx_tokens // 1000}K tokens"
-        else:
-            label = f"≈ {approx_tokens} tokens"
-        self._sn_tok_var.set(label)
 
     # ── 実行 ──
 
@@ -1282,7 +1247,9 @@ class AgentTab(ttk.Frame):
             return
         self._running = True
         self._run_btn.enable(False)
-        scope = "  ".join(self._paths) if self._paths else "（外部ファイルなし）"
+        scope = "  ".join(
+            f"[{'RW' if m == 'rw' else 'R'}]{p}" for p, m in self._paths
+        ) if self._paths else "（外部ファイルなし）"
         sep = "─" * 52
         self._log.append(
             f"\n{sep}\n質問: {query}\nスコープ: {scope}\n{sep}\n", "turn")
@@ -1292,11 +1259,22 @@ class AgentTab(ttk.Frame):
         import json as _json
 
         import agent as ag
+        import config
         import sandbox
         import tool_registry
         from config import REQUIRE_WRITE_APPROVAL
 
-        sandbox.set_allowed_roots(self._paths)
+        # GUI で設定されたコンテキスト長を反映
+        try:
+            ctx_val = int(self._ctx_var.get())
+            if ctx_val > 0:
+                config.CONTEXT_LIMIT = ctx_val
+        except ValueError:
+            pass  # 不正な値は無視してデフォルトを使用
+
+        ro = [p for p, m in self._paths if m == "ro"]
+        rw = [p for p, m in self._paths if m == "rw"]
+        sandbox.set_allowed_roots(ro_paths=ro, rw_paths=rw)
 
         # 書き込み承認コールバック（GUIダイアログ）
         if REQUIRE_WRITE_APPROVAL:
@@ -1327,8 +1305,18 @@ class AgentTab(ttk.Frame):
         old_err = sys.stderr
         sys.stderr = _StderrRouter(self._q)
         try:
-            extra_ctx = _build_session_context(self._session_docs)
-            ans = ag.agent_loop(query, verbose=True, extra_context=extra_ctx)
+            extra_ctx_parts = []
+            if self._paths:
+                lines = "\n".join(
+                    f"- [{'RW' if m == 'rw' else 'R'}] {p}" for p, m in self._paths
+                )
+                extra_ctx_parts.append(
+                    "## 解析対象スコープ\n\n"
+                    "以下のパスが解析・操作の対象です。ツール呼び出し時はこれらのパスを使用してください:\n"
+                    + lines
+                )
+            extra_context = "\n\n".join(extra_ctx_parts)
+            ans = ag.agent_loop(query, verbose=True, extra_context=extra_context)
             self._q.put(("answer", f"\n【回答】\n{ans}\n"))
         except Exception as e:
             self._q.put(("err", f"[error] {e}\n"))
@@ -1616,6 +1604,9 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
+    # config.py の相対パス（SKILLS_DIR 等）が正しく解決されるよう
+    # CWD を agent/ ディレクトリに固定する
+    os.chdir(here)
 
     root = tk.Tk()
     root.title("ナレッジエージェント")

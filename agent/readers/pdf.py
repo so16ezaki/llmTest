@@ -8,7 +8,7 @@ readers/pdf.py — PDF → Markdown変換
 from __future__ import annotations
 
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import PDF_CHUNK_PAGES, PDF_PARALLEL_THRESHOLD, PDF_WORKERS
 
@@ -109,7 +109,7 @@ def _convert_parallel(filepath: str, total_pages: int) -> str:
     results: dict[int, str] = {}
 
     # 並列実行
-    with ProcessPoolExecutor(max_workers=PDF_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=PDF_WORKERS) as executor:
         futures = {
             executor.submit(_convert_chunk, chunk): chunk[1]
             for chunk in chunks
@@ -126,21 +126,6 @@ def _convert_parallel(filepath: str, total_pages: int) -> str:
     return "\n\n".join(ordered)
 
 
-def convert_chapter(args: tuple) -> tuple[int, str, str]:
-    """
-    1章分のページをMarkdownに変換する（ProcessPoolExecutorで実行）。
-
-    Args: (filepath, chapter_idx, page_start, page_end, title)
-      page_start: 開始ページ（0-indexed, inclusive）
-      page_end:   終了ページ（0-indexed, exclusive）
-
-    Returns: (chapter_idx, title, markdown)
-    """
-    filepath, chapter_idx, page_start, page_end, title = args
-    _, md = _convert_chunk((filepath, chapter_idx, page_start, page_end))
-    return (chapter_idx, title, md)
-
-
 def _print_progress(completed: int, total: int) -> None:
     """進捗を表示する。"""
     pct = completed * 100 // total
@@ -154,111 +139,3 @@ def _print_progress(completed: int, total: int) -> None:
         flush=True,
     )
 
-
-def get_page_count(filepath: str) -> int:
-    """PDFの総ページ数を返す。"""
-    import fitz
-    doc = fitz.open(filepath)
-    count = len(doc)
-    doc.close()
-    return count
-
-
-def extract_toc(filepath: str) -> list[tuple[int, str, int]]:
-    """
-    PDFの目次（Table of Contents）を抽出する。
-
-    Returns: [(level, title, page_number), ...]
-    """
-    import fitz
-    doc = fitz.open(filepath)
-    toc = doc.get_toc()
-    doc.close()
-    return toc
-
-
-def detect_headings_by_font(filepath: str, sample_pages: int = 50) -> list[dict]:
-    """
-    フォントサイズ解析で見出し候補を検出する。
-
-    先頭sample_pages分のページを解析し、本文より大きいフォントを見出しと判定する。
-
-    Returns: [{"text": str, "page": int, "font_size": float, "level": int}, ...]
-    """
-    import fitz
-
-    doc = fitz.open(filepath)
-    total = min(len(doc), sample_pages)
-
-    # フォントサイズ→出現回数を集計
-    font_sizes: dict[float, int] = {}
-    blocks_info: list[dict] = []
-
-    for page_idx in range(total):
-        page = doc[page_idx]
-        blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
-        for block in blocks:
-            if block.get("type") != 0:  # テキストブロックのみ
-                continue
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    size = round(span["size"], 1)
-                    text = span["text"].strip()
-                    if not text:
-                        continue
-                    font_sizes[size] = font_sizes.get(size, 0) + len(text)
-                    blocks_info.append({
-                        "text": text,
-                        "page": page_idx,
-                        "font_size": size,
-                    })
-    doc.close()
-
-    if not font_sizes:
-        return []
-
-    # 最頻出フォントサイズ = 本文サイズと推定
-    body_size = max(font_sizes, key=font_sizes.get)
-
-    # 本文より大きいフォントを見出し候補とする
-    heading_sizes = sorted(
-        [s for s in font_sizes if s > body_size + 0.5], reverse=True
-    )
-
-    if not heading_sizes:
-        return []
-
-    # サイズ→レベルのマッピング（大きい順に1, 2, ...）
-    size_to_level = {s: i + 1 for i, s in enumerate(heading_sizes[:3])}
-
-    # 全ページを再スキャンして見出しを抽出
-    headings = []
-    doc = fitz.open(filepath)
-    for page_idx in range(len(doc)):
-        page = doc[page_idx]
-        blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
-        for block in blocks:
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines", []):
-                line_text_parts = []
-                line_size = 0.0
-                for span in line.get("spans", []):
-                    size = round(span["size"], 1)
-                    text = span["text"].strip()
-                    if text:
-                        line_text_parts.append(text)
-                        line_size = max(line_size, size)
-                if line_text_parts and line_size in size_to_level:
-                    full_text = " ".join(line_text_parts)
-                    # 短すぎる行や数字のみは見出しとしない
-                    if len(full_text) < 2 or full_text.replace(" ", "").isdigit():
-                        continue
-                    headings.append({
-                        "text": full_text,
-                        "page": page_idx,
-                        "font_size": line_size,
-                        "level": size_to_level[line_size],
-                    })
-    doc.close()
-    return headings

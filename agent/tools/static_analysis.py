@@ -54,6 +54,15 @@ def static_analysis(path: str, analysis: str) -> str:
         "control_flow":     _analyze_control_flow,
     }
 
+    if analysis == "all":
+        results = {}
+        for key, fn in dispatch.items():
+            try:
+                results[key] = fn(files)
+            except Exception as e:  # noqa: BLE001
+                results[key] = {"error": str(e)}
+        return json.dumps(results, ensure_ascii=False, indent=2)
+
     if analysis not in dispatch:
         return json.dumps({"error": f"未知の解析種別: {analysis}"}, ensure_ascii=False)
 

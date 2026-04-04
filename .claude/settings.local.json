@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(python -c \":*)",
-      "Bash(python -c \"import gui; print\\(''import OK''\\)\")"
+      "Bash(python -c \"import gui; print\\(''import OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
+      "Bash(pip install:*)",
+      "Bash(git add:*)",
+      "Bash(python test_progress.py)",
+      "Bash(KNOWLEDGE_MAX_TOKENS=5000 python -c \":*)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,''agent''\\); import sandbox; print\\(''sandbox OK''\\)\")"
     ]
   }
 }

@@ -16,6 +16,7 @@ import json
 import sys
 
 import dify_client
+from agent import TOOL_REMINDERS, _format_call_log, _pre_compact_result
 from config import LLM_BACKEND, SUB_AGENT_MAX_TURNS
 from tool_registry import TOOL_DEFINITIONS, execute_tool
 
@@ -25,6 +26,17 @@ from tool_registry import TOOL_DEFINITIONS, execute_tool
 AGENT_ROLES: dict[str, dict] = {
     "explorer": {
         "system_prompt": (
+            "【スコープ指定がある場合】\n"
+            "複数のスコープが渡された場合、親子関係にあるパスは最も深い（具体的な）パスのみを\n"
+            "scan_project してください。親ディレクトリのスキャンは不要です。\n"
+            "[RW] マークが付いたスコープが主たる作業対象です。そこから調査を開始してください。\n\n"
+            "【最重要】スコープがプログラムコードのプロジェクトと分かった場合は、"
+            "他の調査より先に以下を実行してください。\n"
+            "1. generate_skeleton — シグネチャ・Docstringのみ抽出し、全体構造を把握する\n"
+            "2. static_analysis — コードを評価・計算する"
+            "（analysis='complexity' で複雑度、'issues' で潜在バグ、"
+            "'metrics' で統計、'dead_code' で未使用コードを検出できます）\n"
+            "read_source でファイルを丸読みする前に必ずこの順で絞り込むこと。\n\n"
             "あなたは探索専門のサブエージェントです。\n"
             "メインエージェントからの指示に従い、ファイル構成・コード構造・"
             "ナレッジの調査を行い、結果を簡潔にレポートしてください。\n"
@@ -151,23 +163,23 @@ def run_sub_agent(role: str, task: str) -> str:
                 result = f"[blocked] {tool_name} はこの役割（{role}）では使用できません。"
             else:
                 result = execute_tool(tool_name, tool_args)
+                result = _pre_compact_result(result)
 
-            print(
-                f"    [{tool_name}] {str(tool_args)[:60]}",
-                file=sys.stderr,
-            )
+            reminder = TOOL_REMINDERS.get(tool_name, "")
+
+            print(_format_call_log(tool_name, tool_args, result, indent="    "), file=sys.stderr)
 
             if LLM_BACKEND == "ollama":
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_id,
-                    "content": result,
+                    "content": result + reminder,
                 })
             else:
                 messages.append({
                     "role": "tool",
                     "name": tool_name,
-                    "content": result,
+                    "content": result + reminder,
                 })
 
     return (

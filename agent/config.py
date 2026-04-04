@@ -34,7 +34,7 @@ MAX_TURNS: int = int(os.getenv("MAX_TURNS", "30"))
 
 # ── コンテキスト管理 ──────────────────────────────────────
 # モデルの最大コンテキスト長（トークン）
-CONTEXT_LIMIT: int = int(os.getenv("CONTEXT_LIMIT", "100000"))
+CONTEXT_LIMIT: int = int(os.getenv("CONTEXT_LIMIT", "60000"))
 
 # コンパクション発火閾値（CONTEXT_LIMIT に対する割合）
 COMPACTION_THRESHOLD: float = float(os.getenv("COMPACTION_THRESHOLD", "0.92"))

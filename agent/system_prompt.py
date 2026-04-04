@@ -51,7 +51,9 @@ _BASE_PROMPT = """\
 - まず list_skills や skill_search で関連スキルを特定してください。
 - 詳細が必要なら read_skill でスキルファイルの全文を読んでください。
 - キーワードで横断検索したい場合は keyword_search を使ってください。
-- コード解析は scan_project → read_source → extract_structure の順で進めてください。
+- コード解析では、scan_project でファイル構成を確認したら、**必ず** generate_skeleton と static_analysis（analysis='all'）を実行してください（read_source でファイルを丸読みする前に）。
+  - static_analysis は analysis='all' がデフォルトです。全種類実行が安全側であり、不要と判断した解析のみ除外できます。
+  - 個別の analysis 指定（'complexity' 等）は、全体解析後に特定項目を再確認する場合のみ使用してください。
 - 成果物は write_file で保存してください。
 - 部分処理されたドキュメントがある場合、get_knowledge_coverageで未処理範囲を確認できます。
 - 未処理部分の情報が必要なら read_pdf_pages で直接読み取れます（自動でmd変換されます）。

@@ -153,6 +153,32 @@ _SUMMARY_PROMPT = """\
 """
 
 
+def _build_minimal_system_prompt(system_prompt: str) -> str:
+    """システムプロンプトからスキルインデックスとメモリを除去した最小版を返す。"""
+    lines = system_prompt.split("\n")
+    result = []
+    skip = False
+    for line in lines:
+        # スキルインデックス・メモリ・セッションナレッジのセクションを除去
+        if line.startswith("## 利用可能なスキル"):
+            skip = True
+            continue
+        if line.startswith("## 永続メモリ"):
+            skip = True
+            continue
+        if line.startswith("## セッションナレッジ"):
+            skip = True
+            continue
+        if line.startswith("## 初回プロジェクト探索"):
+            skip = True
+            continue
+        if skip and line.startswith("## "):
+            skip = False
+        if not skip:
+            result.append(line)
+    return "\n".join(result)
+
+
 def tier3_compact(messages: list[dict], system_prompt: str) -> list[dict]:
     """
     LLMに会話の構造化サマリーを生成させ、コンテキストを再構成する。
@@ -185,18 +211,39 @@ def tier3_compact(messages: list[dict], system_prompt: str) -> list[dict]:
     compressed_tools = []
     for msg in recent_tools:
         content = truncate_to_tokens(
-            msg.get("content", ""), TIER3_MAX_RESULT_TOKENS // len(recent_tools)
+            msg.get("content", ""), TIER3_MAX_RESULT_TOKENS // max(len(recent_tools), 1)
         )
         compressed_tools.append({**msg, "content": content})
 
-    return [
+    result = [
         {"role": "system", "content": "[context compacted]\n\n" + system_prompt},
         {"role": "assistant", "content": summary},
         *compressed_tools,
     ]
 
+    # フェイルセーフ: Tier3再構成後もまだ超過している場合、
+    # システムプロンプトを最小版に切り替えて再試行
+    if needs_compaction(result):
+        minimal_prompt = _build_minimal_system_prompt(system_prompt)
+        result = [
+            {"role": "system", "content": "[context compacted]\n\n" + minimal_prompt},
+            {"role": "assistant", "content": summary},
+            *compressed_tools,
+        ]
+        # それでも超過なら、ツール結果も削除
+        if needs_compaction(result):
+            result = [
+                {"role": "system", "content": "[context compacted]\n\n" + minimal_prompt},
+                {"role": "assistant", "content": truncate_to_tokens(summary, CONTEXT_LIMIT // 4)},
+            ]
+
+    return result
+
 
 # ── メインインターフェース ─────────────────────────────────────────
+
+_last_compact_ratio: float = 0.0
+
 
 def compact(
     messages: list[dict],
@@ -219,17 +266,35 @@ def compact(
     -------
     コンパクション後のメッセージリスト
     """
+    global _last_compact_ratio
+
+    # ループ検出: 前回のコンパクション後と使用率がほぼ同じなら
+    # コンパクションが効いていないのでスキップ（無限ループ防止）
+    current_ratio = usage_ratio(messages)
+    if _last_compact_ratio > 0 and abs(current_ratio - _last_compact_ratio) < 0.05:
+        import sys
+        print(
+            f"[compaction] スキップ — 前回 {_last_compact_ratio:.1%} → "
+            f"今回 {current_ratio:.1%}（改善なし）",
+            file=sys.stderr,
+        )
+        return messages
+
     start_tier = force_tier or 1
 
     if start_tier <= 1:
         messages = tier1_compact(messages)
         if not needs_compaction(messages):
+            _last_compact_ratio = usage_ratio(messages)
             return messages
 
     if start_tier <= 2:
         messages = tier2_compact(messages)
         if not needs_compaction(messages):
+            _last_compact_ratio = usage_ratio(messages)
             return messages
 
     # Tier3
-    return tier3_compact(messages, system_prompt)
+    messages = tier3_compact(messages, system_prompt)
+    _last_compact_ratio = usage_ratio(messages)
+    return messages

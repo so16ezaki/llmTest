@@ -12,7 +12,7 @@ import sys
 
 import compactor
 import dify_client
-from config import LLM_BACKEND, MAX_TURNS, TOOL_RESULT_MAX_TOKENS
+from config import CONTEXT_LIMIT, LLM_BACKEND, MAX_TURNS, TOOL_RESULT_MAX_TOKENS
 from system_prompt import build_system_prompt
 from tool_registry import TOOL_DEFINITIONS, execute_tool
 
@@ -26,7 +26,13 @@ TOOL_REMINDERS: dict[str, str] = {
     "todo_write":
         "\n[reminder] TODOリストの次のタスクに進んでください。",
     "scan_project":
-        "\n[reminder] 重要なファイルをread_sourceやextract_structureで詳しく調べてください。",
+        "\n[reminder] パスは必ずこの結果に含まれる絶対パスをそのまま使用してください（相対パス不可）。"
+        "\n[必須手順] スコープがプログラムコードのプロジェクトと判断できる場合、"
+        " read_source でファイルを丸読みする前に**必ず**次の順で実行してください（省略禁止）:"
+        "\n  1. generate_skeleton — シグネチャ・Docstring のみ抽出し、全体構造を把握する"
+        "\n  2. static_analysis（analysis='all'）— 全10種類の静的解析を一括実行する（不要な解析のみ除外可）"
+        "\nstatic_analysis は analysis='all' がデフォルトです。"
+        " 個別指定は全体解析後の深堀り専用です。初回は必ず 'all' から始めてください。",
     "extract_structure":
         "\n[reminder] 特定のシンボルを深堀りするにはread_sourceを使ってください。"
         " 静的解析が必要ならstatic_analysisも利用できます。",
@@ -46,7 +52,9 @@ TOOL_REMINDERS: dict[str, str] = {
         " 不十分な場合は追加の指示で再度委任してください。",
     "read_source":
         "\n[reminder] このファイルの依存関係にも注目してください。"
-        " 必要なら関連ファイルもread_sourceで確認してください。",
+        " 必要なら関連ファイルも read_source で確認してください。"
+        "\n[確認] コードプロジェクトの解析中に generate_skeleton と static_analysis（analysis='all'）を"
+        " まだ実行していない場合は、この read_source の前に戻って実行してください。",
     "write_file":
         "\n[reminder] ファイルを書き出しました。"
         " 内容に不足がないかread_sourceで確認してください。",
@@ -110,6 +118,39 @@ def _format_tool_call(name: str, args: dict) -> str:
     return f"[tool] {name}({args_str})"
 
 
+def _py_repr(v, head: int = 10, tail: int = 10) -> str:
+    """値をPython形式で表現する（長い文字列は先頭10字+末尾10字）。"""
+    if v is None:
+        return "None"
+    if isinstance(v, bool):
+        return "True" if v else "False"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        if len(v) > head + tail:
+            truncated = v[:head] + "..." + v[-tail:]
+        else:
+            truncated = v
+        return repr(truncated)
+    if isinstance(v, list):
+        items = [_py_repr(i, head, tail) for i in v[:3]]
+        suffix = ", ..." if len(v) > 3 else ""
+        return f"[{', '.join(items)}{suffix}]"
+    if isinstance(v, dict):
+        pairs = [f"{repr(k)}: {_py_repr(val, head, tail)}" for k, val in list(v.items())[:3]]
+        suffix = ", ..." if len(v) > 3 else ""
+        return "{" + ", ".join(pairs) + suffix + "}"
+    return repr(v)
+
+
+def _format_call_log(name: str, args: dict, result: str, indent: str = "") -> str:
+    """[call Tool name](key = val, ...): return = val 形式の1行ログを生成する。"""
+    args_str = ", ".join(f"{k} = {_py_repr(v)}" for k, v in args.items())
+    result_inline = result.replace("\n", " ").strip()
+    result_repr = _py_repr(result_inline)
+    return f"{indent}[call Tool {name}]({args_str}): return = {result_repr}"
+
+
 def agent_loop(
     user_input: str,
     verbose: bool = True,
@@ -140,6 +181,17 @@ def agent_loop(
     # context.py にメッセージリストの参照を登録（compact_now/get_status用）
     from tools.context import set_context_ref
     set_context_ref(messages, system_prompt)
+
+    # 初期プロンプトサイズ検証
+    from config import CONTEXT_LIMIT
+    initial_tokens = compactor.count_messages_tokens(messages)
+    if initial_tokens > CONTEXT_LIMIT * 0.8:
+        print(
+            f"[warning] 初期プロンプトが {initial_tokens:,} トークン "
+            f"(上限 {CONTEXT_LIMIT:,} の {initial_tokens / CONTEXT_LIMIT:.0%})"
+            f" — セッションナレッジの削減またはコンテキスト長の増加を推奨",
+            file=sys.stderr,
+        )
 
     # Dify バックエンドの会話ID管理
     conversation_id = ""
@@ -202,20 +254,12 @@ def agent_loop(
             tool_args = call["args"]
             tool_id = call.get("id", "call_0")
 
-            if verbose:
-                print(f"  {_format_tool_call(tool_name, tool_args)}", file=sys.stderr)
-                # ツール引数の詳細を表示
-                args_json = json.dumps(tool_args, ensure_ascii=False, indent=2)
-                print(f"[tool_args] {args_json}", file=sys.stderr)
-
             result = execute_tool(tool_name, tool_args)
             result = _pre_compact_result(result)
             reminder = TOOL_REMINDERS.get(tool_name, "")
 
-            if verbose:
-                # ツール結果を表示（長い場合は切り詰め）
-                display_result = result[:2000] + "..." if len(result) > 2000 else result
-                print(f"[tool_result] {display_result}", file=sys.stderr)
+            # ツール呼び出しを1行で常に出力
+            print(_format_call_log(tool_name, tool_args, result), file=sys.stderr)
 
             if LLM_BACKEND == "ollama":
                 # Ollama: OpenAI形式の tool 結果

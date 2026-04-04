@@ -66,48 +66,70 @@ _INTERNAL_ROOTS: tuple[str, ...] = (
 )
 
 # ユーザーが選択した許可ルート（絶対パス・realpath解決済み）
-_allowed_roots: list[str] = []
+_ro_roots: list[str] = []   # 読み取り専用
+_rw_roots: list[str] = []   # 読み書き（読み取りも含む）
 
 
-def set_allowed_roots(paths: list[str]) -> None:
-    """許可ルートを設定する。既存の設定は上書きされる。"""
-    global _allowed_roots
-    _allowed_roots = [os.path.realpath(p) for p in paths if p]
+def set_allowed_roots(
+    ro_paths: list[str] | None = None,
+    rw_paths: list[str] | None = None,
+) -> None:
+    """
+    許可ルートを設定する。既存の設定は上書きされる。
+
+    Parameters
+    ----------
+    ro_paths:
+        読み取り専用として許可するパスのリスト
+    rw_paths:
+        読み書き両方を許可するパスのリスト
+    """
+    global _ro_roots, _rw_roots
+    _ro_roots = [os.path.realpath(p) for p in (ro_paths or []) if p]
+    _rw_roots = [os.path.realpath(p) for p in (rw_paths or []) if p]
 
 
 def clear() -> None:
     """許可ルートをリセットする（内部パスは引き続き有効）。"""
-    global _allowed_roots
-    _allowed_roots = []
+    global _ro_roots, _rw_roots
+    _ro_roots = []
+    _rw_roots = []
 
 
 def get_allowed_roots() -> list[str]:
     """現在の許可ルート一覧を返す（内部パス含む）。"""
-    return list(_INTERNAL_ROOTS) + list(_allowed_roots)
+    return list(_INTERNAL_ROOTS) + list(_rw_roots) + list(_ro_roots)
 
 
-def is_allowed(path: str) -> bool:
+def is_allowed(path: str, write: bool = False) -> bool:
     """
     パスがアクセス許可範囲内かどうかを返す。
 
     - 相対パスは _AGENT_DIR 基準で解決する
     - シンボリックリンクは realpath で解決してチェックする
     - ディレクトリトラバーサル（../）も realpath で無効化
+    - write=True のとき、読み取り専用ルートは許可しない
     """
     # 絶対パスに解決
     if not os.path.isabs(path):
         path = os.path.join(_AGENT_DIR, path)
     real = os.path.realpath(path)
 
-    # 内部パスチェック
+    # 内部パスチェック（常に許可）
     for root in _INTERNAL_ROOTS:
         if real == root or real.startswith(root + os.sep):
             return True
 
-    # ユーザー許可ルートチェック
-    for root in _allowed_roots:
+    # 読み書き許可ルートチェック
+    for root in _rw_roots:
         if real == root or real.startswith(root + os.sep):
             return True
+
+    # 読み取り専用ルートチェック（書き込みは不可）
+    if not write:
+        for root in _ro_roots:
+            if real == root or real.startswith(root + os.sep):
+                return True
 
     return False
 
@@ -123,7 +145,8 @@ def check(path: str, operation: str = "アクセス") -> None:
     operation:
         エラーメッセージに使う操作名（"読み取り" / "書き込み" 等）
     """
-    if not is_allowed(path):
+    write = (operation == "書き込み")
+    if not is_allowed(path, write=write):
         roots = get_allowed_roots()
         roots_str = "\n  ".join(roots) if roots else "（未設定）"
         raise SandboxViolation(

@@ -96,6 +96,9 @@ def _is_tool_call_json(obj: object, known_tool_names: set[str]) -> bool:
         fn = obj.get("function")
         if isinstance(fn, dict) and fn.get("name") in known_tool_names:
             return True
+        # {"function": "tool_name", "arguments": {...}}
+        if isinstance(fn, str) and fn in known_tool_names:
+            return True
         # {"tool_calls": [...]}
         if "tool_calls" in obj and isinstance(obj["tool_calls"], list):
             return True
@@ -123,6 +126,10 @@ def _parse_tool_call_from_json(
         if isinstance(fn, dict):
             name = fn.get("name", "")
             args = fn.get("arguments") or fn.get("args") or {}
+        elif isinstance(fn, str):
+            # {"function": "tool_name", "arguments": {...}} 形式
+            name = fn
+            args = d.get("arguments") or d.get("args") or d.get("parameters") or {}
         else:
             name = d.get("name", "")
             args = d.get("arguments") or d.get("args") or d.get("parameters") or {}
