@@ -171,6 +171,10 @@ def agent_loop(
         if response.conversation_id:
             conversation_id = response.conversation_id
 
+        # LLMの思考内容を表示（ツール呼び出しの有無にかかわらず）
+        if verbose and response.content:
+            print(f"[thinking] {response.content}", file=sys.stderr)
+
         # ツール呼び出しなし → 最終回答
         if not response.has_tool_calls:
             return response.answer
@@ -200,10 +204,18 @@ def agent_loop(
 
             if verbose:
                 print(f"  {_format_tool_call(tool_name, tool_args)}", file=sys.stderr)
+                # ツール引数の詳細を表示
+                args_json = json.dumps(tool_args, ensure_ascii=False, indent=2)
+                print(f"[tool_args] {args_json}", file=sys.stderr)
 
             result = execute_tool(tool_name, tool_args)
             result = _pre_compact_result(result)
             reminder = TOOL_REMINDERS.get(tool_name, "")
+
+            if verbose:
+                # ツール結果を表示（長い場合は切り詰め）
+                display_result = result[:2000] + "..." if len(result) > 2000 else result
+                print(f"[tool_result] {display_result}", file=sys.stderr)
 
             if LLM_BACKEND == "ollama":
                 # Ollama: OpenAI形式の tool 結果
