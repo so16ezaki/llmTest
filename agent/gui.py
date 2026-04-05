@@ -1316,7 +1316,12 @@ class AgentTab(ttk.Frame):
                     + lines
                 )
             extra_context = "\n\n".join(extra_ctx_parts)
-            ans = ag.agent_loop(query, verbose=True, extra_context=extra_context)
+            ans = ag.agent_loop(
+                query,
+                verbose=True,
+                extra_context=extra_context,
+                scopes=self._paths if self._paths else None,
+            )
             self._q.put(("answer", f"\n【回答】\n{ans}\n"))
         except Exception as e:
             self._q.put(("err", f"[error] {e}\n"))

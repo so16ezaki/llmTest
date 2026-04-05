@@ -52,6 +52,7 @@ def static_analysis(path: str, analysis: str) -> str:
         "issues":           _analyze_issues,
         "data_flow":        _analyze_data_flow,
         "control_flow":     _analyze_control_flow,
+        "skeleton":         _analyze_skeleton,
     }
 
     if analysis == "all":
@@ -137,7 +138,8 @@ def _analyze_metrics(files: list[str]) -> dict:
 
 
 def _analyze_call_graph(files: list[str]) -> dict:
-    """関数/メソッドの呼び出しグラフ。"""
+    """関数/メソッドの呼び出しグラフ（called_by 逆引きマップ付き）。"""
+    from collections import defaultdict
     nodes = []
     edges = []
     seen_nodes: set[str] = set()
@@ -153,10 +155,27 @@ def _analyze_call_graph(files: list[str]) -> dict:
                     "line": func.get("line", 0),
                 })
                 seen_nodes.add(key)
-            for callee in func.get("calls", []):
-                edges.append({"from": func["name"], "to": callee, "file": fpath})
+            # call_sites（行番号付き）があれば優先、なければ calls（文字列リスト）を使う
+            call_list = func.get("call_sites") or [
+                {"name": c, "line": 0} for c in func.get("calls", [])
+            ]
+            for callee in call_list:
+                edges.append({
+                    "from": func["name"],
+                    "from_file": fpath,
+                    "to": callee["name"],
+                    "line": callee.get("line", 0),
+                })
 
-    return {"nodes": nodes, "edges": edges}
+    # 逆引きマップ
+    called_by: dict[str, list] = defaultdict(list)
+    for edge in edges:
+        called_by[edge["to"]].append({
+            "caller": edge["from"],
+            "line": edge.get("line", 0),
+        })
+
+    return {"nodes": nodes, "edges": edges, "called_by": dict(called_by)}
 
 
 def _analyze_dependency_graph(files: list[str]) -> dict:
@@ -277,30 +296,51 @@ def _analyze_issues(files: list[str]) -> dict:
 
 
 def _analyze_data_flow(files: list[str]) -> dict:
-    """変数の定義→代入→参照の追跡（簡易実装）。"""
+    """変数の定義→代入→参照の追跡。"""
     results = []
     for fpath in files:
         parser = _get_parser(fpath)
         for var in parser.get_variables():
             results.append({
                 "variable": var["name"],
+                "type": var.get("type", ""),
                 "file": fpath,
+                "scope": var.get("scope", "global"),
+                "function": var.get("function"),
                 "definitions": [{"line": var.get("line", 0)}],
-                "assignments": [],
-                "references": [],
+                "assignments": var.get("written_by", []),
+                "references": var.get("read_by", []),
             })
     return {"data_flow": results}
 
 
 def _analyze_control_flow(files: list[str]) -> dict:
-    """関数内の分岐・ループ構造（簡易実装）。"""
+    """関数内の分岐・ループ構造。tree-sitter利用可能なパーサーは詳細ブロック木を返す。"""
     functions = []
     for fpath in files:
         parser = _get_parser(fpath)
-        for func in parser.get_functions():
-            functions.append({
-                "function": func["name"],
-                "file": fpath,
-                "blocks": func.get("blocks", []),
-            })
+        if hasattr(parser, "get_control_flow"):
+            for cf in parser.get_control_flow():
+                functions.append({
+                    "function": cf["function"],
+                    "file": fpath,
+                    "blocks": cf.get("blocks", []),
+                })
+        else:
+            for func in parser.get_functions():
+                functions.append({
+                    "function": func["name"],
+                    "file": fpath,
+                    "blocks": func.get("blocks", []),
+                })
     return {"functions": functions}
+
+
+def _analyze_skeleton(files: list[str]) -> dict:
+    """関数シグネチャ・型定義・マクロ・includeのみを返すスケルトン解析。"""
+    skeletons = []
+    for fpath in files:
+        parser = _get_parser(fpath)
+        if hasattr(parser, "get_skeleton"):
+            skeletons.append(parser.get_skeleton())
+    return {"skeletons": skeletons}

@@ -173,7 +173,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "scan_project",
-            "description": "ディレクトリのファイル構成を返す。sort_by='mtime'で更新日時順に表示。",
+            "description": (
+                "ディレクトリのファイル構成を返す。sort_by='mtime'で更新日時順に表示。"
+                " analyze=False（デフォルト）のときはファイルツリーのみを返す。"
+                " analyze=True を指定した場合のみ static_analysis(analysis='all') を自動実行する。"
+                " 通常は analyze=False でファイル構成を把握してから、タスクに必要な解析を個別に呼ぶこと。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -186,6 +191,16 @@ TOOL_DEFINITIONS: list[dict] = [
                         "description": "ソート方法: 'name'（ツリー形式）または 'mtime'（更新日時順）",
                         "enum": ["name", "mtime"],
                         "default": "name",
+                    },
+                    "analyze": {
+                        "type": "boolean",
+                        "description": (
+                            "Trueのとき、コードファイルを含むディレクトリで"
+                            " static_analysis(analysis='all') を自動実行し結果を付加する。"
+                            " デフォルトは False（ファイルツリーのみ）。"
+                            " 全解析が本当に必要な場合のみ True を指定すること。"
+                        ),
+                        "default": False,
                     },
                 },
                 "required": ["path"],
@@ -278,6 +293,7 @@ TOOL_DEFINITIONS: list[dict] = [
                         "description": (
                             "解析種別。コードプロジェクト解析では通常 'all' を使用して全種類を一括実行してください。"
                             " 不要と判断した解析は除外できます。個別指定（'complexity' 等）は特定解析の再実行・深堀り専用です。"
+                            " 'skeleton' は関数シグネチャ・型定義・マクロ・includeのみを返し、実装詳細なしにAPIを把握するのに適しています。"
                         ),
                         "enum": [
                             "all",
@@ -291,6 +307,7 @@ TOOL_DEFINITIONS: list[dict] = [
                             "type_info",
                             "metrics",
                             "issues",
+                            "skeleton",
                         ],
                     },
                 },
@@ -303,13 +320,19 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "generate_skeleton",
-            "description": "ファイルからシグネチャ+Docstring+インターフェースのみを抽出したスケルトンを返す。",
+            "description": (
+                "単一ソースファイルのシグネチャ+Docstring+インターフェースのみを抽出して返す。"
+                "【ディレクトリ不可。必ずファイルパスを指定すること】"
+                " ディレクトリを渡すとエラーになります。"
+                " プロジェクト全体の解析には scan_project + static_analysis を使用してください。"
+                " このツールは特定ファイルのシグネチャを深掘りしたい場合のみ使用してください。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "対象のソースファイルパス",
+                        "description": "対象のソースファイルパス（ディレクトリを渡すとエラー）",
                     },
                 },
                 "required": ["path"],
@@ -344,7 +367,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "todo_write",
-            "description": "TODOリストの作成・更新。全体を毎回上書きする。",
+            "description": "TODOリストの作成・更新。全体を毎回上書きする。引数 todos にはオブジェクトの配列を直接渡すこと（例: [{\"id\":\"t1\",\"content\":\"...\",\"status\":\"pending\"}]）。{\"type\":\"array\",\"items\":...} のようなスキーマ記述形式は不可。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -463,21 +486,36 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "sub_agent",
-            "description": "サブエージェントにタスクを委任する。"
-                "explorer: ファイル探索・コード調査、"
-                "planner: 計画策定・TODO作成、"
-                "executor: ファイル書き込み・編集実行",
+            "description": (
+                "サブエージェントにタスクを委任する。\n"
+                "pipeline: explorer→planner→[executor→verifier] を自動実行（スコープ付きタスクの標準）。\n"
+                "explorer: ファイル探索・コード調査のみ。\n"
+                "planner: 計画策定・TODO作成のみ。\n"
+                "executor: ファイル書き込み・編集のみ。\n"
+                "verifier: 実行結果の検証のみ。\n"
+                "スコープ（[R]/[RW]）が指定されているタスクは pipeline を使うこと。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "role": {
                         "type": "string",
-                        "enum": ["explorer", "planner", "executor"],
-                        "description": "サブエージェントの役割",
+                        "enum": ["pipeline", "explorer", "planner", "executor", "verifier"],
+                        "description": "サブエージェントの役割。スコープ付きタスクは pipeline を指定する。",
                     },
                     "task": {
                         "type": "string",
-                        "description": "サブエージェントへの指示（調査内容・計画要件・実行内容）",
+                        "description": "サブエージェントへの指示。ユーザーの元の要求を含めること。",
+                    },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "pipeline ロール専用。スコープの絶対パス（例: C:/Users/foo/project）。",
+                    },
+                    "scope_mode": {
+                        "type": "string",
+                        "enum": ["R", "RW"],
+                        "description": "pipeline ロール専用。R=読み取り専用（executor なし）、RW=読み書き可（executor あり）。",
+                        "default": "R",
                     },
                 },
                 "required": ["role", "task"],

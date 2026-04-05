@@ -32,3 +32,39 @@
 ---
 
 <!-- エージェントはここに新しい情報を memory_write ツールで追記します -->
+
+## project_summary
+### プロジェクト概要: c_project
+
+**ファイル構成**
+- `include/` (2 ファイル)
+  - `logger.h` (663B)
+  - `sensor.h` (1,294B)
+- `src/` (3 ファイル)
+  - `logger.c` (751B)
+  - `main.c` (2,516B)
+  - `sensor.c` (6,246B)
+- `Makefile` (300B)
+
+**呼び出し関係の主な流れ**
+- `init_system` がプロジェクトの初期化を担当し、`logger_init` および `sensor_init` を呼び出す。
+- `run_monitor` がセンサシステムを監視し、`process_all_sensors` を実行。
+- `sensor.c` 内の `sensor_read` が `sensor_calibrate` と `_sensor_selftest` を経由して処理を行う。
+
+**発見**
+- `log_alert` が `sprintf` を利用しているため、バッファオーバーフローのリスクが生じている可能性がある。
+- `process_all_sensors` が複数回呼び出されるため、コードの複雑度が高く、保守が難しい可能性がある。
+
+**次に調査すべき項目**
+1. `log_alert` における `sprintf` のバッファサイズが適切かを確認 (static_analysis(analysis='issues'))
+2. `process_all_sensors` の複雑度を解析 (static_analysis(analysis='complexity'))
+3. モジュール間の依存関係を確認 (static_analysis(analysis='dependency_graph'))
+
+## project_dependencies
+C_projectディレクトリ内ではsensor_irq_handlerとloggerの2つの主要モジュールが依存関係を持ち、loggerはスレッドセーフ性の検証が必要。ライフサイクル図作成にあたり、dependecy_map.jsonの生成が最優先。
+
+## project_path
+C:/Users/so16e/Documents/vscode/python/llmtest/llmTest/test_data/c_project
+
+## lifecycle_sequence
+init_system → logger_init → sensor_init → run_monitor → process_all_sensors → sensor_read → sensor_calibrate → _sensor_selftest

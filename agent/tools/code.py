@@ -24,9 +24,19 @@ _IGNORE_EXTENSIONS = {".pyc", ".pyo", ".pyd", ".so", ".dll", ".exe"}
 
 # ── scan_project ──────────────────────────────────────────────────
 
-def scan_project(path: str, sort_by: str = "name") -> str:
+_CODE_EXTS_FOR_ANALYZE = {
+    ".py", ".js", ".ts", ".c", ".cpp", ".h", ".hpp",
+    ".java", ".go", ".rs", ".rb", ".php", ".cs",
+}
+
+
+def scan_project(path: str, sort_by: str = "name", analyze: bool = False) -> str:
     """
     ディレクトリのファイル構成をツリー形式で返す。
+
+    analyze=False（デフォルト）の場合、ファイルツリーのみを返す。
+    analyze=True の場合、コードファイルを含むディレクトリで
+    static_analysis(analysis='all') を自動実行して結果を付加する。
 
     Parameters
     ----------
@@ -34,6 +44,9 @@ def scan_project(path: str, sort_by: str = "name") -> str:
         スキャン対象のディレクトリパス
     sort_by:
         ソート方法。"name"（デフォルト、ツリー形式）または "mtime"（更新日時順フラットリスト）
+    analyze:
+        True のとき、コードプロジェクトを自動検出し static_analysis(analysis='all') を実行する。
+        タスクに必要な解析を個別に指定する場合は False（デフォルト）のままにすること。
     """
     if not os.path.exists(path):
         return f"[error] パスが見つかりません: {path}"
@@ -43,18 +56,35 @@ def scan_project(path: str, sort_by: str = "name") -> str:
         return f"ファイル: {path} ({size:,} bytes)"
 
     if sort_by == "mtime":
-        return _scan_by_mtime(path)
+        result = _scan_by_mtime(path)
+    else:
+        lines = [f"## {path}/\n"]
+        _build_tree(path, lines, prefix="", depth=0, max_depth=5)
 
-    lines = [f"## {path}/\n"]
-    _build_tree(path, lines, prefix="", depth=0, max_depth=5)
+        # ファイル数・行数の統計
+        stats = _count_stats(path)
+        lines.append(f"\n**統計:** {stats['files']}ファイル, {stats['dirs']}ディレクトリ")
+        if stats["total_lines"]:
+            lines.append(f"(コードファイル合計 {stats['total_lines']:,}行)")
 
-    # ファイル数・行数の統計
-    stats = _count_stats(path)
-    lines.append(f"\n**統計:** {stats['files']}ファイル, {stats['dirs']}ディレクトリ")
-    if stats["total_lines"]:
-        lines.append(f"(コードファイル合計 {stats['total_lines']:,}行)")
+        result = "\n".join(lines)
 
-    return "\n".join(lines)
+    # ── 自動静的解析 ──────────────────────────────────────────────────
+    if analyze and os.path.isdir(path):
+        has_code = any(
+            os.path.splitext(fname)[1] in _CODE_EXTS_FOR_ANALYZE
+            for _, _, fnames in os.walk(path)
+            for fname in fnames
+        )
+        if has_code:
+            try:
+                from tools.static_analysis import static_analysis as _sa
+                analysis_json = _sa(path, "all")
+                result += "\n\n## 静的解析結果 (analysis='all')\n" + analysis_json
+            except Exception as e:  # noqa: BLE001
+                result += f"\n\n[warn] 自動静的解析に失敗しました: {e}"
+
+    return result
 
 
 def _scan_by_mtime(path: str) -> str:
@@ -407,6 +437,8 @@ def generate_skeleton(path: str) -> str:
     ext = os.path.splitext(path)[1]
     if ext == ".py":
         skeleton = _python_skeleton(content)
+    elif ext in (".c", ".cpp", ".h", ".hpp"):
+        skeleton = _c_skeleton_text(path)
     else:
         skeleton = _generic_skeleton(content, ext)
 
@@ -532,6 +564,83 @@ def _generic_skeleton(content: str, ext: str) -> str:
         i += 1
 
     return "\n".join(output)
+
+
+def _c_skeleton_text(path: str) -> str:
+    """C/C++ ファイルから tree-sitter を使ってスケルトンテキストを生成する。"""
+    try:
+        from tools.parsers.c_parser import CParser
+        parser = CParser(path)
+        sk = parser.get_skeleton()
+    except Exception:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError:
+            return ""
+        return _generic_skeleton(content, ".c")
+
+    lines: list[str] = []
+
+    # Includes
+    if sk.get("includes"):
+        lines.append("// === Includes ===")
+        for inc in sk["includes"]:
+            lines.append(f"#include {inc}")
+        lines.append("")
+
+    # Macros
+    if sk.get("macros"):
+        lines.append("// === Macros ===")
+        for m in sk["macros"]:
+            if m.get("params"):
+                lines.append(f"#define {m['name']}{m['params']} {m['value']}")
+            else:
+                lines.append(f"#define {m['name']} {m['value']}")
+        lines.append("")
+
+    # Types
+    if sk.get("types"):
+        lines.append("// === Types ===")
+        for t in sk["types"]:
+            kind = t.get("kind", "struct")
+            name = t["name"]
+            if kind in ("struct", "union"):
+                members = t.get("members", [])
+                if members:
+                    lines.append(f"typedef {kind} {{")
+                    for m in members:
+                        lines.append(f"    {m['type']} {m['name']};")
+                    lines.append(f"}} {name};")
+                else:
+                    lines.append(f"{kind} {name};")
+            elif kind == "enum":
+                values = t.get("values", [])
+                lines.append(f"typedef enum {{")
+                for v in values:
+                    val_str = f" = {v['value']}" if v.get("value") else ""
+                    lines.append(f"    {v['name']}{val_str},")
+                lines.append(f"}} {name};")
+            elif kind == "typedef":
+                lines.append(f"typedef {t.get('aliased_type', '')} {name};")
+        lines.append("")
+
+    # Function signatures
+    if sk.get("function_signatures"):
+        lines.append("// === Function Signatures ===")
+        for sig in sk["function_signatures"]:
+            qualifiers = " ".join(sig.get("qualifiers", []))
+            ret = sig["return_type"]
+            prefix = f"{qualifiers} {ret}".strip() if qualifiers else ret
+            params = ", ".join(
+                f"{p['type']} {p['name']}".strip() if p.get("type") and p["type"] != "..."
+                else p.get("name", "...")
+                for p in sig.get("params", [])
+            ) or "void"
+            lines.append(f"{prefix} {sig['name']}({params});")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── dependency_map ───────────────────────────────────────────────

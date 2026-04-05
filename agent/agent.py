@@ -27,17 +27,20 @@ TOOL_REMINDERS: dict[str, str] = {
         "\n[reminder] TODOリストの次のタスクに進んでください。",
     "scan_project":
         "\n[reminder] パスは必ずこの結果に含まれる絶対パスをそのまま使用してください（相対パス不可）。"
-        "\n[必須手順] スコープがプログラムコードのプロジェクトと判断できる場合、"
-        " read_source でファイルを丸読みする前に**必ず**次の順で実行してください（省略禁止）:"
-        "\n  1. generate_skeleton — シグネチャ・Docstring のみ抽出し、全体構造を把握する"
-        "\n  2. static_analysis（analysis='all'）— 全10種類の静的解析を一括実行する（不要な解析のみ除外可）"
-        "\nstatic_analysis は analysis='all' がデフォルトです。"
-        " 個別指定は全体解析後の深堀り専用です。初回は必ず 'all' から始めてください。",
+        "\n[info] analyze=False の場合、ファイル構成のみ取得しています。"
+        " 静的解析はタスクの目的に応じて static_analysis で個別に実行してください。"
+        "\n[info] generate_skeleton は個別ファイルの詳細確認専用です（ディレクトリ不可）。"
+        " 追加の深堀りが必要な場合のみ使用してください。"
+        "\n[禁止] この結果に「出典: XXX p.XX」形式の引用を付けないこと。ツール実行結果に出典はありません。",
     "extract_structure":
-        "\n[reminder] 特定のシンボルを深堀りするにはread_sourceを使ってください。"
-        " 静的解析が必要ならstatic_analysisも利用できます。",
+        "\n[reminder] extract_structure は簡易実装です。"
+        " 正確な解析には static_analysis でタスクに必要な種類を個別指定してください。"
+        " 特定シンボルの実装確認には read_source を使ってください。",
     "static_analysis":
-        "\n[reminder] 解析結果を解釈し、問題があればread_sourceで該当箇所を確認してください。",
+        "\n[reminder] 解析結果を解釈し、問題があればread_sourceで該当箇所を確認してください。"
+        "\n[reminder] このタスクに対応するTODOアイテムがあれば、todo_writeでステータスを更新してください。"
+        "\n[reminder] ライフサイクル・フロー調査の場合は call_graph と control_flow の両方を実行してください。"
+        "\n[禁止] この結果に「出典: XXX p.XX」形式の引用を付けないこと。ツール実行結果に出典はありません。",
     "list_skills":
         "\n[reminder] 関連するスキルはskill_searchで絞り込み、read_skillで詳細を読んでください。",
     "read_pdf_pages":
@@ -47,17 +50,21 @@ TOOL_REMINDERS: dict[str, str] = {
         "\n[reminder] 未処理ページの内容を確認するにはread_pdf_pagesを使ってください。",
     "convert_pages_to_skill":
         "\n[reminder] 変換が完了しました。keyword_searchやskill_searchで検索可能になりました。",
-    "sub_agent":
-        "\n[reminder] サブエージェントの結果を評価し、"
-        " 不十分な場合は追加の指示で再度委任してください。",
+    "sub_agent": (
+        "\n[reminder] サブエージェントの結果を評価してください。"
+        "\n  - explorer 完了後: 必ず sub_agent(role='planner') を呼び出してTODO作成してください"
+        "\n  - planner 完了後:  必ず sub_agent(role='executor') を呼び出して実行してください"
+        "\n  - 不十分な場合は追加の指示で再度委任してください"
+    ),
     "read_source":
         "\n[reminder] このファイルの依存関係にも注目してください。"
-        " 必要なら関連ファイルも read_source で確認してください。"
-        "\n[確認] コードプロジェクトの解析中に generate_skeleton と static_analysis（analysis='all'）を"
-        " まだ実行していない場合は、この read_source の前に戻って実行してください。",
+        " 必要なら関連ファイルも read_source で確認してください。",
     "write_file":
-        "\n[reminder] ファイルを書き出しました。"
-        " 内容に不足がないかread_sourceで確認してください。",
+        "\n[reminder] レスポンスが '[sandbox]' で始まる場合はファイル作成がブロックされています。"
+        " その場合は完了と報告せず、スコープが読み取り専用である旨をユーザーに伝えてください。"
+        " 正常に書き出せた場合は内容に不足がないかread_sourceで確認してください。"
+        "\n[reminder] このファイル作成に対応するTODOアイテムがあれば、"
+        " 直ちに todo_write でステータスを 'done' に更新してください。",
     "edit_file":
         "\n[reminder] 編集が完了しました。"
         " read_sourceで変更結果を確認してください。",
@@ -65,8 +72,9 @@ TOOL_REMINDERS: dict[str, str] = {
         "\n[reminder] スケルトンから全体構造を把握したら、"
         " 重要な関数はread_sourceで実装を確認してください。",
     "dependency_map":
-        "\n[reminder] 依存関係を把握したら、"
-        " 重要なモジュールをread_sourceやextract_structureで詳しく調べてください。",
+        "\n[reminder] 依存関係を把握しました。追加の解析が必要な場合は"
+        " static_analysis で必要な種類のみ個別に指定してください（all の使用は最小限に）。"
+        "\n[reminder] このタスクに対応するTODOアイテムがあれば、todo_writeでステータスを更新してください。",
 }
 
 
@@ -155,6 +163,7 @@ def agent_loop(
     user_input: str,
     verbose: bool = True,
     extra_context: str = "",
+    scopes: list[tuple[str, str]] | None = None,
 ) -> str:
     """
     エージェントのメインループ。
@@ -168,14 +177,44 @@ def agent_loop(
     extra_context:
         セッション限りの追加コンテキスト。
         システムプロンプトの末尾に注入され、skills/には保存されない。
+    scopes:
+        [(path, mode), ...] 形式のスコープリスト。mode は "r" または "rw"。
+        指定された場合、LLMにツール選択を任せず Python が pipeline を自動実行する。
     """
+    # スコープがある場合、pipeline を Python レベルで自動実行
+    pipeline_result = ""
+    if scopes:
+        from sub_agent import run_pipeline
+        scope_path, scope_mode_raw = scopes[0]
+        scope_mode = "RW" if scope_mode_raw.lower() == "rw" else "R"
+        if verbose:
+            print(
+                f"[pipeline] スコープ検出: {scope_path} ({scope_mode})"
+                " → LLMに委ねず自動実行",
+                file=sys.stderr,
+            )
+        pipeline_result = run_pipeline(
+            user_input, scope_path=scope_path, scope_mode=scope_mode
+        )
+
     # 初期メッセージ構築
     system_prompt = build_system_prompt()
     if extra_context:
         system_prompt = system_prompt + "\n\n" + extra_context
+    # パイプライン結果がある場合、最終合成のみ LLM に依頼
+    if pipeline_result:
+        user_message = (
+            f"{user_input}\n\n"
+            f"[パイプライン自動実行結果]\n{pipeline_result}\n\n"
+            "上記のパイプライン実行結果をもとに、ユーザーへの最終回答を簡潔に生成してください。"
+            "追加のツール呼び出しは不要です。"
+        )
+    else:
+        user_message = user_input
+
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_input},
+        {"role": "user", "content": user_message},
     ]
 
     # context.py にメッセージリストの参照を登録（compact_now/get_status用）

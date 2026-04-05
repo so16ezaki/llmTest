@@ -35,7 +35,9 @@ _BASE_PROMPT = """\
 
 ## 引用ルール（最重要）
 
-スキルファイルから得た情報を使って回答する場合、**必ず引用元を明示**してください。
+**引用の対象はスキルファイルのみです。** ツール実行結果（dependency_map・static_analysis・scan_project・read_source 等）には引用をつけないでください。
+
+スキルファイル（read_skill・keyword_search で取得した情報）を使って回答する場合、**必ず引用元を明示**してください。
 各スキルファイルの先頭には `> 📍 出典: \`ファイル名\` | p.XX–YY | §N/M` という形式で引用情報が記載されています。
 
 - **回答内で情報を使う箇所の直後**に、以下の形式で引用を記載してください:
@@ -45,15 +47,18 @@ _BASE_PROMPT = """\
 - ページ番号が明記されている場合は必ず含めてください。
 - 複数箇所から引用した場合は、それぞれの箇所に個別の引用を付けてください。
 - 引用情報がないスキルファイルの場合は、ファイルパスとセクション番号を記載してください。
+- **ツール実行結果に基づく図・解析結果には引用を付けない**（dependency_map の結果、static_analysis の結果等）。
 
 ## ツール使用ガイド
 
 - まず list_skills や skill_search で関連スキルを特定してください。
 - 詳細が必要なら read_skill でスキルファイルの全文を読んでください。
 - キーワードで横断検索したい場合は keyword_search を使ってください。
-- コード解析では、scan_project でファイル構成を確認したら、**必ず** generate_skeleton と static_analysis（analysis='all'）を実行してください（read_source でファイルを丸読みする前に）。
-  - static_analysis は analysis='all' がデフォルトです。全種類実行が安全側であり、不要と判断した解析のみ除外できます。
-  - 個別の analysis 指定（'complexity' 等）は、全体解析後に特定項目を再確認する場合のみ使用してください。
+- コード解析では、scan_project(analyze=False) でファイル構成を確認してから、タスクの目的に応じて必要な解析のみ個別に指定してください（read_source でファイルを丸読みする前に）。
+  - 呼び出しフロー・ライフサイクル調査: static_analysis(analysis='call_graph') + 'control_flow'
+  - バグ・品質調査: static_analysis(analysis='issues') + 'complexity'
+  - モジュール依存調査: static_analysis(analysis='dependency_graph')
+  - **static_analysis(analysis='all') は11種類の解析を一括実行するため、本当に全量必要な場合のみ使用してください。**
 - 成果物は write_file で保存してください。
 - 部分処理されたドキュメントがある場合、get_knowledge_coverageで未処理範囲を確認できます。
 - 未処理部分の情報が必要なら read_pdf_pages で直接読み取れます（自動でmd変換されます）。
@@ -66,23 +71,28 @@ _BASE_PROMPT = """\
 
 ## サブエージェント
 
-複雑なタスクでは sub_agent ツールで専門エージェントに委任できます:
-- sub_agent(role="explorer"): ファイル探索・コード構造調査（読み取り専用）
-- sub_agent(role="planner"): 計画策定・TODO作成・メモリ管理
-- sub_agent(role="executor"): ファイル書き込み・編集実行
+sub_agent ツールで専門エージェントに委任できます。
 
-各サブエージェントには十分なコンテキスト（ファイルパス、調査結果など）を渡してください。
+**スコープ（[R]/[RW]）が指定されているタスクは必ず pipeline を使ってください:**
+```
+sub_agent(role="pipeline", task="<ユーザーの要求>", scope_path="<絶対パス>", scope_mode="R" or "RW")
+```
+- `scope_mode="R"`: 読み取り専用（explorer→planner のみ実行、executor なし）
+- `scope_mode="RW"`: 読み書き可（explorer→planner→executor→verifier を全実行）
 
-## 推奨ワークフロー
+pipeline は内部で以下を自動実行します:
+1. explorer: ファイル構成・コード構造を調査
+2. planner: TODO作成・作業計画を策定
+3. executor: ファイル作成・編集を実行（RW のみ）
+4. verifier: 実行結果を確認（RW のみ）
 
-複雑なタスクでは以下のフェーズで進めてください:
+個別ロールは特定フェーズだけ再実行したい場合のみ使用してください:
+- sub_agent(role="explorer"): 追加調査のみ
+- sub_agent(role="planner"): 計画の修正のみ
+- sub_agent(role="executor"): 追加ファイル作成のみ
+- sub_agent(role="verifier"): 成果物の確認のみ
 
-1. **探索**: sub_agent(role="explorer") でファイル構成・コード構造を調査
-2. **計画**: sub_agent(role="planner") でTODO作成・作業計画を策定
-3. **実行**: sub_agent(role="executor") でファイル作成・編集を実行
-4. **検証**: explorerに再調査を依頼するか、直接ツールで成果を確認
-
-シンプルな質問にはサブエージェントを使わず直接回答してください。
+シンプルな質問（情報検索・説明のみ）はサブエージェントを使わず直接回答してください。
 """
 
 _AUTO_SUMMARY_PROMPT = """\
@@ -92,7 +102,8 @@ _AUTO_SUMMARY_PROMPT = """\
 永続メモリに project_summary が見つかりません。
 最初のタスクの前に、以下を実行してプロジェクト全体像を把握してください:
 
-1. sub_agent(role="explorer") で scan_project と extract_structure を実行
+1. sub_agent(role="explorer") で scan_project(analyze=False) を実行してファイル構成を把握し、
+   必要な静的解析（call_graph・issues・complexity 等）を個別に実行する
 2. 結果をもとに memory_write(key="project_summary") でプロジェクト概要を保存
    - ディレクトリ構成と各ディレクトリの役割
    - 主要モジュール/ファイルの責務

@@ -105,6 +105,7 @@ SEARCH_PAGE_SIZE: int = int(os.getenv("SEARCH_PAGE_SIZE", "20"))
 
 # ── サブエージェント ─────────────────────────────────────
 SUB_AGENT_MAX_TURNS: int = int(os.getenv("SUB_AGENT_MAX_TURNS", "10"))
+PIPELINE_VERIFY_RETRIES: int = int(os.getenv("PIPELINE_VERIFY_RETRIES", "2"))
 
 # ── プロジェクト概要 ─────────────────────────────────────
 PROJECT_SUMMARY_FILENAME: str = "_overview.md"
