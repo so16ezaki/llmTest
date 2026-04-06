@@ -20,7 +20,7 @@ LLM_BACKEND: str = os.getenv("LLM_BACKEND", "ollama")  # "ollama" | "dify"
 
 # ── Ollama API ────────────────────────────────────────────
 # OllamaのOpenAI互換エンドポイント
-OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "")
 OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:4b")
 
 # ── Dify Cloud API ────────────────────────────────────────
