@@ -23,7 +23,7 @@
 <div id="msg">NEON SKY RUNNER<div id="sub">← → or A/D : move &nbsp; SPACE : jump &nbsp; [click to start]</div></div>
 
 <script type="importmap">
-{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+{ "imports": { "three": "https://unpkg.com/three@0.171.0/build/three.module.js" } }
 </script>
 <script type="module">
 import * as THREE from 'three';
@@ -37,7 +37,35 @@ camera.position.set(0, 4, 8);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
+
+// ---- Simple SFX (WebAudio, no assets) ----
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function sfx({ freq = 440, freq2 = null, type = 'sine', dur = 0.15, vol = 0.15 }) {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (freq2 !== null) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freq2), t0 + dur);
+  gain.gain.setValueAtTime(vol, t0);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(t0); osc.stop(t0 + dur);
+}
+const sfxJump = () => sfx({ freq: 300, freq2: 700, type: 'sine', dur: 0.18, vol: 0.12 });
+const sfxCoin = () => { sfx({ freq: 880, freq2: 1320, type: 'square', dur: 0.08, vol: 0.08 }); setTimeout(() => sfx({ freq: 1320, type: 'square', dur: 0.12, vol: 0.08 }), 60); };
+const sfxHit  = () => sfx({ freq: 220, freq2: 60, type: 'sawtooth', dur: 0.3, vol: 0.2 });
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth/innerHeight;
@@ -46,9 +74,14 @@ addEventListener('resize', () => {
 });
 
 // Lights
-scene.add(new THREE.AmbientLight(0x8080ff, 0.6));
-const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-dir.position.set(5, 10, 7);
+scene.add(new THREE.AmbientLight(0x8080ff, 0.8));
+const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+dir.position.set(5, 18, 7);
+dir.castShadow = true;
+dir.shadow.mapSize.set(1024, 1024);
+dir.shadow.camera.left = -15; dir.shadow.camera.right = 15;
+dir.shadow.camera.top = 15; dir.shadow.camera.bottom = -15;
+dir.shadow.camera.near = 1; dir.shadow.camera.far = 60;
 scene.add(dir);
 const pinkLight = new THREE.PointLight(0xff00ff, 2, 40);
 pinkLight.position.set(0, 6, 0);
@@ -73,6 +106,7 @@ const edgeMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
 function makeTile(z) {
   const g = new THREE.Group();
   const floor = new THREE.Mesh(new THREE.BoxGeometry(TRACK_W, 0.4, TILE_LEN), tileMat);
+  floor.receiveShadow = true;
   g.add(floor);
   // glowing edges
   for (const x of [-TRACK_W/2, TRACK_W/2]) {
@@ -93,6 +127,7 @@ const body = new THREE.Mesh(
   new THREE.MeshStandardMaterial({ color: 0x00ffaa, emissive: 0x00aa77, metalness: 0.6 })
 );
 body.rotation.x = Math.PI / 2;
+body.castShadow = true;
 player.add(body);
 const wing = new THREE.Mesh(
   new THREE.BoxGeometry(2, 0.1, 0.6),
@@ -121,12 +156,12 @@ function spawnRow(z) {
     const type = Math.random() < 0.5 ? 'block' : 'bar';
     if (type === 'block') {
       const m = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.6, 1.6), obMat);
-      m.position.set(lanes[l], 1, z);
+      m.position.set(lanes[l], 1, z); m.castShadow = true;
       scene.add(m); obstacles.push({ mesh: m, type: 'block' });
     } else {
       // low bar - jump over
       const m = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.4, 0.4), obMat);
-      m.position.set(lanes[l], 0.5, z);
+      m.position.set(lanes[l], 0.5, z); m.castShadow = true;
       scene.add(m); obstacles.push({ mesh: m, type: 'bar' });
     }
   }
@@ -135,7 +170,7 @@ function spawnRow(z) {
   if (free.length) {
     const l = free[Math.floor(Math.random()*free.length)];
     const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.5), gemMat);
-    m.position.set(lanes[l], 1.5, z);
+    m.position.set(lanes[l], 1.5, z); m.castShadow = true;
     scene.add(m); gems.push(m);
   }
 }
@@ -144,6 +179,31 @@ function spawnRow(z) {
 const keys = {};
 addEventListener('keydown', e => keys[e.code] = true);
 addEventListener('keyup', e => keys[e.code] = false);
+
+// Touch: tap left/right half = lane, swipe up = jump
+let touchStartX = 0, touchStartY = 0, touchMoved = false;
+addEventListener('touchstart', e => {
+  initAudio();
+  const t = e.changedTouches[0];
+  touchStartX = t.clientX; touchStartY = t.clientY; touchMoved = false;
+  if (!running) start();
+}, { passive: true });
+addEventListener('touchmove', e => {
+  const t = e.changedTouches[0];
+  if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 20) touchMoved = true;
+}, { passive: true });
+addEventListener('touchend', e => {
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStartX, dy = t.clientY - touchStartY;
+  if (touchMoved && dy < -40 && Math.abs(dy) > Math.abs(dx)) {
+    // swipe up = jump
+    keys['Space'] = true; setTimeout(() => keys['Space'] = false, 60);
+  } else if (!touchMoved) {
+    // tap: lane switch
+    if (t.clientX < innerWidth / 2) targetX = targetX === -2.4 ? 0 : -2.4;
+    else targetX = targetX === 2.4 ? 0 : 2.4;
+  }
+}, { passive: true });
 
 // State
 let running = false;
@@ -155,6 +215,7 @@ const hud = { s: document.getElementById('score'), sp: document.getElementById('
 const msg = document.getElementById('msg');
 
 function start() {
+  initAudio();
   running = true;
   msg.style.display = 'none';
   score = 0; life = 3; speed = 0.35;
@@ -164,7 +225,7 @@ function start() {
   obstacles.length = 0; gems.length = 0;
   nextSpawnZ = -30;
 }
-addEventListener('click', () => { if (!running) start(); });
+addEventListener('click', () => { initAudio(); if (!running) start(); });
 addEventListener('keydown', e => { if (e.code === 'Space' && !running) start(); });
 
 function gameOver() {
@@ -192,7 +253,7 @@ function animate() {
 
     // jump
     if ((keys['Space'] || keys['ArrowUp'] || keys['KeyW']) && !jumping) {
-      vy = 0.35; jumping = true;
+      vy = 0.35; jumping = true; sfxJump();
     }
     if (jumping) {
       player.position.y += vy;
@@ -206,7 +267,7 @@ function animate() {
       if (tile.position.z > 20) tile.position.z -= tiles.length * TILE_LEN;
     });
     obstacles.forEach(o => o.mesh.position.z += forward);
-    gems.forEach(g => { g.position.z += forward; g.rotation.y += 0.05; g.position.y = 1.5 + Math.sin(t*3 + g.position.x)*0.2; });
+    gems.forEach(g => { g.position.z += forward; g.rotation.y += dt * 3; g.position.y = 1.5 + Math.sin(t*3 + g.position.x)*0.2; });
 
     // spawn new rows
     nextSpawnZ += forward;
@@ -228,6 +289,7 @@ function animate() {
         scene.remove(m); obstacles.splice(i,1);
         life--;
         hud.l.textContent = life;
+        sfxHit();
         // flash
         body.material.emissive.setHex(0xff0000);
         setTimeout(() => body.material.emissive.setHex(0x00aa77), 150);
@@ -239,7 +301,7 @@ function animate() {
       if (g.position.z > 12) { scene.remove(g); gems.splice(i,1); continue; }
       if (Math.abs(g.position.z - pz) < 1 && Math.abs(g.position.x - px) < 1 && Math.abs(g.position.y - py) < 1.2) {
         scene.remove(g); gems.splice(i,1);
-        score += 10;
+        score += 10; sfxCoin();
       }
     }
 
