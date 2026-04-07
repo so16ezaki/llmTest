@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <title>Little Town Explorer - WebGL 3D</title>
 <style>
-  body { margin: 0; overflow: hidden; background: #87ceeb; font-family: system-ui, sans-serif; color: #fff; }
+  body { margin: 0; overflow: hidden; background: #87ceeb; font-family: system-ui, sans-serif; color: #fff; overscroll-behavior: none; }
+  canvas { touch-action: none; -webkit-user-select: none; user-select: none; }
   #hud {
     position: fixed; top: 10px; left: 10px; z-index: 10;
     background: rgba(0,0,0,0.45); padding: 10px 14px; border-radius: 8px;
@@ -270,10 +271,13 @@ const player = {
 // Pointer lock
 const startBtn = document.getElementById('startBtn');
 const titleEl = document.getElementById('title');
+const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 startBtn.addEventListener('click', () => {
   initAudio();
-  renderer.domElement.requestPointerLock();
   titleEl.style.display = 'none';
+  if (!isTouchDevice) {
+    try { renderer.domElement.requestPointerLock(); } catch(e) {}
+  }
 });
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement === renderer.domElement) {
@@ -306,7 +310,7 @@ renderer.domElement.addEventListener('touchstart', e => {
     if (t.clientX < innerWidth / 2 && !joyStart) {
       joyStart = { id: t.identifier, x: t.clientX, y: t.clientY };
     } else if (t.clientX >= innerWidth / 2 && !lookTouch) {
-      lookTouch = { id: t.identifier, x: t.clientX, y: t.clientY };
+      lookTouch = { id: t.identifier, x: t.clientX, y: t.clientY, startX: t.clientX, startY: t.clientY, moved: false };
       const now = performance.now();
       if (now - lastTap < 300) { keys['Space'] = true; setTimeout(() => keys['Space'] = false, 80); }
       lastTap = now;
@@ -325,13 +329,18 @@ renderer.domElement.addEventListener('touchmove', e => {
       player.pitch -= (t.clientY - lookTouch.y) * 0.005;
       player.pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, player.pitch));
       lookTouch.x = t.clientX; lookTouch.y = t.clientY;
+      if (Math.hypot(t.clientX - lookTouch.startX, t.clientY - lookTouch.startY) > 10) lookTouch.moved = true;
     }
   }
 }, { passive: true });
 renderer.domElement.addEventListener('touchend', e => {
   for (const t of e.changedTouches) {
     if (joyStart && t.identifier === joyStart.id) { joyStart = null; joyVec.x = 0; joyVec.y = 0; }
-    if (lookTouch && t.identifier === lookTouch.id) { lookTouch = null; tryTalk(); }
+    if (lookTouch && t.identifier === lookTouch.id) {
+      const wasTap = !lookTouch.moved;
+      lookTouch = null;
+      if (wasTap) tryTalk();
+    }
   }
 }, { passive: true });
 

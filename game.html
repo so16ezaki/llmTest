@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <title>Neon Sky Runner - WebGL 3D Game</title>
 <style>
-  body { margin: 0; overflow: hidden; background: #000; font-family: system-ui, sans-serif; color: #fff; }
+  body { margin: 0; overflow: hidden; background: #000; font-family: system-ui, sans-serif; color: #fff; overscroll-behavior: none; }
+  canvas { touch-action: none; -webkit-user-select: none; user-select: none; }
   #hud {
     position: fixed; top: 12px; left: 12px; z-index: 10;
     font-size: 20px; text-shadow: 0 0 8px #0ff, 0 0 2px #fff;
@@ -182,28 +183,34 @@ addEventListener('keyup', e => keys[e.code] = false);
 
 // Touch: tap left/right half = lane, swipe up = jump
 let touchStartX = 0, touchStartY = 0, touchMoved = false;
-addEventListener('touchstart', e => {
+const canvasEl = renderer.domElement;
+canvasEl.addEventListener('touchstart', e => {
+  e.preventDefault();
   initAudio();
   const t = e.changedTouches[0];
   touchStartX = t.clientX; touchStartY = t.clientY; touchMoved = false;
-  if (!running) start();
-}, { passive: true });
-addEventListener('touchmove', e => {
+  if (!running) { start(); return; }
+}, { passive: false });
+canvasEl.addEventListener('touchmove', e => {
+  e.preventDefault();
   const t = e.changedTouches[0];
   if (Math.hypot(t.clientX - touchStartX, t.clientY - touchStartY) > 20) touchMoved = true;
-}, { passive: true });
-addEventListener('touchend', e => {
+}, { passive: false });
+canvasEl.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (!running) return;
   const t = e.changedTouches[0];
   const dx = t.clientX - touchStartX, dy = t.clientY - touchStartY;
   if (touchMoved && dy < -40 && Math.abs(dy) > Math.abs(dx)) {
     // swipe up = jump
     keys['Space'] = true; setTimeout(() => keys['Space'] = false, 60);
   } else if (!touchMoved) {
-    // tap: lane switch
-    if (t.clientX < innerWidth / 2) targetX = targetX === -2.4 ? 0 : -2.4;
-    else targetX = targetX === 2.4 ? 0 : 2.4;
+    // tap: lane switch (absolute, not toggle — more predictable)
+    if (t.clientX < innerWidth / 3) targetX = -2.4;
+    else if (t.clientX > innerWidth * 2 / 3) targetX = 2.4;
+    else targetX = 0;
   }
-}, { passive: true });
+}, { passive: false });
 
 // State
 let running = false;
