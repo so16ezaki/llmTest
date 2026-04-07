@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Little Town Explorer - WebGL 3D</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #87ceeb; font-family: system-ui, sans-serif; color: #fff; }
+  #hud {
+    position: fixed; top: 10px; left: 10px; z-index: 10;
+    background: rgba(0,0,0,0.45); padding: 10px 14px; border-radius: 8px;
+    font-size: 14px; line-height: 1.6;
+  }
+  #hud b { color: #ffe066; }
+  #dialog {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.75); padding: 14px 22px; border-radius: 10px;
+    font-size: 18px; border: 2px solid #ffe066; max-width: 70%;
+    display: none; z-index: 10;
+  }
+  #title {
+    position: fixed; top: 30%; left: 0; right: 0; text-align: center;
+    z-index: 20; pointer-events: none;
+  }
+  #title h1 { font-size: 48px; margin: 0; text-shadow: 3px 3px 0 #000, 0 0 20px #ffe066; }
+  #title p { font-size: 18px; pointer-events: auto; }
+  #title button {
+    font-size: 20px; padding: 10px 30px; cursor: pointer;
+    background: #ffe066; color: #222; border: none; border-radius: 8px; font-weight: bold;
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div>🪙 コイン: <b id="coins">0</b> / <b id="total">0</b></div>
+  <div>📍 <b id="area">ひろば</b></div>
+  <div style="margin-top:6px; font-size:12px; opacity:0.8;">
+    WASD/矢印: 移動 &nbsp; マウス: 視点 &nbsp; Shift: ダッシュ &nbsp; Space: ジャンプ &nbsp; E: 話す
+  </div>
+</div>
+<div id="dialog"></div>
+<div id="title">
+  <h1>LITTLE TOWN EXPLORER</h1>
+  <p>小さな町を歩き回ってコインを集め、住人と話そう！</p>
+  <p><button id="startBtn">▶ スタート (クリックでポインタロック)</button></p>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb, 60, 200);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Lights
+scene.add(new THREE.HemisphereLight(0xffffee, 0x556633, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+sun.position.set(30, 50, 20);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -80; sun.shadow.camera.right = 80;
+sun.shadow.camera.top = 80; sun.shadow.camera.bottom = -80;
+scene.add(sun);
+
+// Ground
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(400, 400),
+  new THREE.MeshStandardMaterial({ color: 0x4a9c4a })
+);
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Collider list (axis-aligned boxes)
+const colliders = []; // {minX,maxX,minZ,maxZ}
+function addCollider(x, z, w, d) { colliders.push({ minX: x-w/2, maxX: x+w/2, minZ: z-d/2, maxZ: z+d/2 }); }
+
+// Roads (crossed)
+const roadMat = new THREE.MeshStandardMaterial({ color: 0x3a3a3a });
+const r1 = new THREE.Mesh(new THREE.PlaneGeometry(8, 200), roadMat);
+r1.rotation.x = -Math.PI/2; r1.position.y = 0.01; scene.add(r1);
+const r2 = new THREE.Mesh(new THREE.PlaneGeometry(200, 8), roadMat);
+r2.rotation.x = -Math.PI/2; r2.position.y = 0.01; scene.add(r2);
+
+// Plaza (center fountain)
+const plaza = new THREE.Mesh(new THREE.CircleGeometry(8, 32), new THREE.MeshStandardMaterial({ color: 0xc0a878 }));
+plaza.rotation.x = -Math.PI/2; plaza.position.y = 0.02; scene.add(plaza);
+const fountain = new THREE.Mesh(new THREE.CylinderGeometry(2, 2.5, 1, 16), new THREE.MeshStandardMaterial({ color: 0x8899aa }));
+fountain.position.y = 0.5; fountain.castShadow = true; scene.add(fountain);
+addCollider(0, 0, 5, 5);
+const water = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 0.3, 16), new THREE.MeshStandardMaterial({ color: 0x3399ff, emissive: 0x114477, transparent: true, opacity: 0.8 }));
+water.position.y = 1.1; scene.add(water);
+
+// Houses
+function makeHouse(x, z, w, h, d, color, roofColor) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color }));
+  body.position.y = h/2; body.castShadow = true; body.receiveShadow = true;
+  g.add(body);
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w,d)*0.75, h*0.6, 4), new THREE.MeshStandardMaterial({ color: roofColor }));
+  roof.position.y = h + h*0.3; roof.rotation.y = Math.PI/4; roof.castShadow = true;
+  g.add(roof);
+  // door
+  const door = new THREE.Mesh(new THREE.PlaneGeometry(1, 1.8), new THREE.MeshStandardMaterial({ color: 0x4a2f1a }));
+  door.position.set(0, 0.9, d/2 + 0.01);
+  g.add(door);
+  // windows
+  const winMat = new THREE.MeshStandardMaterial({ color: 0xffee88, emissive: 0x886600 });
+  for (const wx of [-w*0.3, w*0.3]) {
+    const w1 = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8), winMat);
+    w1.position.set(wx, h*0.65, d/2 + 0.01); g.add(w1);
+  }
+  g.position.set(x, 0, z);
+  scene.add(g);
+  addCollider(x, z, w, d);
+  return g;
+}
+
+const houseColors = [
+  [0xe8c888, 0x884422], [0xc8d8e8, 0x334466], [0xe8a8a8, 0x661122],
+  [0xa8e8a8, 0x224422], [0xe8d8a8, 0x664422], [0xd8a8e8, 0x442266],
+];
+const housePositions = [
+  [-18, -18], [18, -18], [-18, 18], [18, 18],
+  [-34, -8], [34, -8], [-34, 8], [34, 8],
+  [-8, -34], [8, -34], [-8, 34], [8, 34],
+];
+housePositions.forEach(([x,z], i) => {
+  const [c, rc] = houseColors[i % houseColors.length];
+  const w = 7 + Math.random()*2, h = 4 + Math.random()*2, d = 7 + Math.random()*2;
+  makeHouse(x, z, w, h, d, c, rc);
+});
+
+// Trees
+function makeTree(x, z) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.4, 2), new THREE.MeshStandardMaterial({ color: 0x6b4423 }));
+  trunk.position.y = 1; trunk.castShadow = true; g.add(trunk);
+  const leaves = new THREE.Mesh(new THREE.SphereGeometry(1.5, 8, 6), new THREE.MeshStandardMaterial({ color: 0x2d7a2d }));
+  leaves.position.y = 2.8; leaves.castShadow = true; g.add(leaves);
+  g.position.set(x, 0, z);
+  scene.add(g);
+  addCollider(x, z, 1, 1);
+}
+for (let i = 0; i < 40; i++) {
+  const x = (Math.random()-0.5)*150, z = (Math.random()-0.5)*150;
+  if (Math.abs(x) < 6 || Math.abs(z) < 6) continue;
+  if (Math.hypot(x, z) < 10) continue;
+  // avoid overlap with houses roughly
+  if (housePositions.some(([hx,hz]) => Math.hypot(hx-x, hz-z) < 8)) continue;
+  makeTree(x, z);
+}
+
+// Coins
+const coins = [];
+const coinGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.1, 16);
+const coinMat = new THREE.MeshStandardMaterial({ color: 0xffd700, emissive: 0x886600, metalness: 0.8, roughness: 0.2 });
+for (let i = 0; i < 25; i++) {
+  const c = new THREE.Mesh(coinGeo, coinMat);
+  let x, z;
+  do { x = (Math.random()-0.5)*120; z = (Math.random()-0.5)*120; }
+  while (Math.hypot(x, z) < 4);
+  c.position.set(x, 1, z);
+  c.rotation.x = Math.PI/2;
+  c.castShadow = true;
+  scene.add(c);
+  coins.push(c);
+}
+document.getElementById('total').textContent = coins.length;
+
+// NPCs
+const npcs = [];
+function makeNPC(x, z, color, name, lines) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.0, 4, 8), new THREE.MeshStandardMaterial({ color }));
+  body.position.y = 0.9; body.castShadow = true; g.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.35, 12, 10), new THREE.MeshStandardMaterial({ color: 0xffd8b0 }));
+  head.position.y = 1.9; head.castShadow = true; g.add(head);
+  g.position.set(x, 0, z);
+  scene.add(g);
+  npcs.push({ group: g, name, lines, lineIdx: 0, baseY: 0 });
+}
+makeNPC(4, -6, 0xff6666, "パン屋のベン", [
+  "こんにちは！ 焼きたてのパンはいかが？",
+  "町の北には古い時計塔があるよ。",
+  "噴水で願い事をするといい事があるって噂…",
+]);
+makeNPC(-5, 7, 0x66aaff, "本屋のリナ", [
+  "最近この町に引っ越してきたの。",
+  "緑の屋根の家には秘密があるらしいよ。",
+]);
+makeNPC(20, 3, 0x66dd66, "農家のトム", [
+  "木の近くにコインが落ちてるのを見たぞ。",
+  "全部で25枚あるはずじゃ。集めてみな！",
+]);
+makeNPC(-22, -4, 0xddaa44, "旅人のサヤ", [
+  "世界は広いわ。でもこの町は特別ね。",
+  "すべてのコインを集めたら、何かが起こるかも…？",
+]);
+
+// Player (first person)
+const player = {
+  pos: new THREE.Vector3(0, 1.6, 12),
+  vel: new THREE.Vector3(),
+  yaw: 0, pitch: 0,
+  onGround: true,
+};
+
+// Pointer lock
+const startBtn = document.getElementById('startBtn');
+const titleEl = document.getElementById('title');
+startBtn.addEventListener('click', () => {
+  renderer.domElement.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement === renderer.domElement) {
+    titleEl.style.display = 'none';
+  } else {
+    titleEl.style.display = 'block';
+  }
+});
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  player.yaw -= e.movementX * 0.002;
+  player.pitch -= e.movementY * 0.002;
+  player.pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, player.pitch));
+});
+
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyE') tryTalk();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+
+// Dialog
+const dialogEl = document.getElementById('dialog');
+let dialogTimer = 0, currentNpc = null;
+function showDialog(name, line) {
+  dialogEl.innerHTML = `<b style="color:#ffe066;">${name}</b><br>${line}`;
+  dialogEl.style.display = 'block';
+  dialogTimer = 4;
+}
+function tryTalk() {
+  let closest = null, cd = 3;
+  for (const n of npcs) {
+    const d = player.pos.distanceTo(n.group.position);
+    if (d < cd) { cd = d; closest = n; }
+  }
+  if (closest) {
+    const line = closest.lines[closest.lineIdx % closest.lines.length];
+    closest.lineIdx++;
+    showDialog(closest.name, line);
+  }
+}
+
+// Collision
+function collideMove(dx, dz) {
+  const r = 0.4;
+  let nx = player.pos.x + dx, nz = player.pos.z + dz;
+  for (const c of colliders) {
+    if (nx + r > c.minX && nx - r < c.maxX && player.pos.z + r > c.minZ && player.pos.z - r < c.maxZ) {
+      nx = player.pos.x;
+    }
+  }
+  for (const c of colliders) {
+    if (player.pos.x + r > c.minX && player.pos.x - r < c.maxX && nz + r > c.minZ && nz - r < c.maxZ) {
+      nz = player.pos.z;
+    }
+  }
+  player.pos.x = Math.max(-190, Math.min(190, nx));
+  player.pos.z = Math.max(-190, Math.min(190, nz));
+}
+
+function getArea() {
+  const d = Math.hypot(player.pos.x, player.pos.z);
+  if (d < 10) return "ひろば";
+  if (Math.abs(player.pos.x) < 4 || Math.abs(player.pos.z) < 4) return "大通り";
+  if (player.pos.z < -15) return "北の住宅街";
+  if (player.pos.z > 15) return "南の住宅街";
+  if (player.pos.x < -15) return "西の住宅街";
+  if (player.pos.x > 15) return "東の住宅街";
+  return "郊外";
+}
+
+let coinsGot = 0;
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  // movement
+  const speed = (keys['ShiftLeft'] || keys['ShiftRight']) ? 10 : 5;
+  let fx = 0, fz = 0;
+  if (keys['KeyW'] || keys['ArrowUp']) fz -= 1;
+  if (keys['KeyS'] || keys['ArrowDown']) fz += 1;
+  if (keys['KeyA'] || keys['ArrowLeft']) fx -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) fx += 1;
+  const len = Math.hypot(fx, fz);
+  if (len > 0) { fx /= len; fz /= len; }
+  const sinY = Math.sin(player.yaw), cosY = Math.cos(player.yaw);
+  const mx = (fx * cosY + fz * sinY) * speed * dt;
+  const mz = (-fx * sinY + fz * cosY) * speed * dt;
+  collideMove(mx, mz);
+
+  // jump & gravity
+  if ((keys['Space']) && player.onGround) { player.vel.y = 6; player.onGround = false; }
+  player.vel.y -= 18 * dt;
+  player.pos.y += player.vel.y * dt;
+  if (player.pos.y <= 1.6) { player.pos.y = 1.6; player.vel.y = 0; player.onGround = true; }
+
+  camera.position.copy(player.pos);
+  camera.rotation.order = 'YXZ';
+  camera.rotation.y = player.yaw;
+  camera.rotation.x = player.pitch;
+
+  // coin collect + spin
+  for (let i = coins.length - 1; i >= 0; i--) {
+    const c = coins[i];
+    c.rotation.z += dt * 3;
+    c.position.y = 1 + Math.sin(t*2 + i) * 0.15;
+    if (player.pos.distanceTo(c.position) < 1.2) {
+      scene.remove(c); coins.splice(i, 1);
+      coinsGot++;
+      document.getElementById('coins').textContent = coinsGot;
+      if (coins.length === 0) {
+        showDialog("★ 町の精霊", "全部のコインを集めたね！ ありがとう、君はこの町のヒーローだ！");
+        dialogTimer = 999;
+      }
+    }
+  }
+
+  // npc idle bob
+  for (const n of npcs) {
+    n.group.position.y = Math.sin(t*2 + n.group.position.x) * 0.05;
+    n.group.rotation.y += dt * 0.3;
+  }
+
+  // water shimmer
+  water.material.emissiveIntensity = 0.5 + Math.sin(t*3)*0.3;
+
+  // area
+  document.getElementById('area').textContent = getArea();
+
+  // dialog timer
+  if (dialogTimer > 0) {
+    dialogTimer -= dt;
+    if (dialogTimer <= 0) dialogEl.style.display = 'none';
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
