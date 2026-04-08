@@ -339,11 +339,17 @@ def _save_cp(page: int):
     with open(CHECKPOINT, "w", encoding="utf-8") as f:
         json.dump({"last": page}, f)
 
+def _ensure_dir(path: str):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+
 def _save_md_cache(chunk_map: dict[int, dict]):
+    _ensure_dir(MD_CACHE)
     with open(MD_CACHE, "w", encoding="utf-8") as f:
         json.dump({str(k): v for k, v in chunk_map.items()}, f, ensure_ascii=False)
 
 def _save_doc(doc: fitz.Document) -> fitz.Document:
+    _ensure_dir(OUTPUT_PDF)
     tmp = OUTPUT_PDF + ".tmp"
     doc.save(tmp, deflate=True)
     doc.close()

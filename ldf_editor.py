@@ -702,37 +702,118 @@ class LdfEditor:
 # ──────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
+    # ============================================================
+    # 設定（ここを編集する）
+    # ============================================================
 
-    if len(sys.argv) < 2:
-        print("Usage: python ldf_editor.py <input.ldf> [output.ldf]")
-        print()
-        print("Example (as library):")
-        print('  editor = LdfEditor("sample.ldf")')
-        print('  print(editor.nodes_df)')
-        print('  print(editor.frames_df)')
-        print('  print(editor.signals_df)')
-        print()
-        print("  # DataFrameで直接編集")
-        print('  df = editor.signals_df')
-        print('  df.loc[df["name"] == "Signal1", "init_value"] = "0x01"')
-        print('  editor.signals_df = df')
-        print()
-        print("  # 便利メソッドで追加")
-        print('  editor.add_signal("NewSig", 8, 0, "Slave1", "Master", "Frame1", 16)')
-        print('  editor.save("output.ldf")')
-        sys.exit(0)
+    INPUT_FILE = "sample.ldf"
+    OUTPUT_FILE = "output.ldf"
 
-    input_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    # --- ノード追加 ---
+    NEW_NODES = [
+        # (name, role)
+        # ("Sensor2", "Slave"),
+    ]
 
-    editor = LdfEditor(input_path)
+    # --- フレーム追加 ---
+    NEW_FRAMES = [
+        # (name, frame_id, publisher, size)
+        # ("LightStatus", 0x10, "Motor1", 2),
+    ]
+
+    # --- シグナル追加（start bit自動計算） ---
+    NEW_SIGNALS = [
+        # (frame, signal_name, size)
+        # (frame, signal_name, size, init_value, publisher, subscribers)
+        # ("MotorStatus", "MotorError", 4),
+        # ("MotorStatus", "MotorMode",  4),
+    ]
+
+    # --- シグナル編集 ---
+    SIGNAL_EDITS = {
+        # "signal_name": {"属性": 値},
+        # "MotorSpeed": {"init_value": "0xFF"},
+    }
+
+    # --- フレーム編集 ---
+    FRAME_EDITS = {
+        # "frame_name": {"属性": 値},
+        # "MotorStatus": {"size": 8},
+    }
+
+    # --- ノード編集 ---
+    NODE_EDITS = {
+        # "node_name": {"属性": 値},
+        # "ECU_Master": {"time_base": 10.0},
+    }
+
+    # --- 削除 ---
+    DELETE_NODES = [
+        # ("node_name", cascade=True/False),
+    ]
+    DELETE_FRAMES = [
+        # ("frame_name", cascade=True/False),
+    ]
+    DELETE_SIGNALS = [
+        # "signal_name",
+    ]
+
+    # --- スケジュールテーブル追加 ---
+    NEW_SCHEDULE_TABLES = {
+        # "TableName": [(frame, delay_ms), ...],
+        # "MainSchedule": [
+        #     ("MotorStatus", 10),
+        #     ("SensorData",  10),
+        #     ("MotorCmd",    10),
+        # ],
+    }
+
+    # ============================================================
+    # 実行（以下は編集不要）
+    # ============================================================
+
+    editor = LdfEditor(INPUT_FILE)
+
+    for name, role in NEW_NODES:
+        editor.add_node(name, role)
+
+    for name, fid, pub, size in NEW_FRAMES:
+        editor.add_frame(name, fid, pub, size)
+
+    editor.add_signals_auto(NEW_SIGNALS)
+
+    for name, attrs in SIGNAL_EDITS.items():
+        editor.edit_signal(name, **attrs)
+
+    for name, attrs in FRAME_EDITS.items():
+        editor.edit_frame(name, **attrs)
+
+    for name, attrs in NODE_EDITS.items():
+        editor.edit_node(name, **attrs)
+
+    for item in DELETE_SIGNALS:
+        editor.delete_signal(item)
+
+    for name, cascade in DELETE_FRAMES:
+        editor.delete_frame(name, cascade=cascade)
+
+    for name, cascade in DELETE_NODES:
+        editor.delete_node(name, cascade=cascade)
+
+    for table_name, entries in NEW_SCHEDULE_TABLES.items():
+        editor.add_schedule_table(table_name, entries)
+
+    # 結果表示
     print("=== Nodes ===")
     print(editor.nodes_df.to_string(index=False))
     print("\n=== Frames ===")
     print(editor.frames_df.to_string(index=False))
     print("\n=== Signals ===")
     print(editor.signals_df.to_string(index=False))
+    st_df = editor.schedule_tables_df
+    if not st_df.empty:
+        print("\n=== Schedule Tables ===")
+        print(st_df.to_string(index=False))
 
     warnings = editor.validate()
     if warnings:
@@ -740,6 +821,5 @@ if __name__ == "__main__":
         for w in warnings:
             print(f"  - {w}")
 
-    if output_path:
-        editor.save(output_path)
-        print(f"\nSaved to {output_path}")
+    editor.save(OUTPUT_FILE)
+    print(f"\nSaved to {OUTPUT_FILE}")
